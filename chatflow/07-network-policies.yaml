@@ -1,0 +1,302 @@
+---
+################################################################################
+# CiliumNetworkPolicy: Orchestrator ingress
+#
+# Allows:
+#   - Cilium Gateway (Envoy pods) to reach orchestrator-service :8080
+#   - EMQX to call back for MQTT auth/ACL at /api/v1/mqtt/*
+#   - Client pods to call /internal/* callbacks
+#   - Postgres egress from orchestrator (handled in postgres policy below)
+#
+# Deny-by-default is enforced once this policy is applied. The existing
+# nginx-based path has no NetworkPolicy so this is a net security improvement.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orchestrator-ingress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow-gateway
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: orchestrator
+
+  ingress:
+    # Allow Cilium Gateway (reserved:ingress identity) -> orchestrator HTTP
+    # In Cilium Gateway API mode, envoy traffic uses the reserved "ingress"
+    # entity, not regular pod labels (cilium-envoy runs in kube-system).
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+    # Allow EMQX -> orchestrator (MQTT auth + ACL endpoints)
+    - fromEndpoints:
+        - matchLabels:
+            app: emqx
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: POST
+                path: /api/v1/mqtt/auth
+              - method: POST
+                path: /api/v1/mqtt/acl
+
+    # Allow dynamically-created client pods -> orchestrator /internal/*
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: client
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+          rules:
+            http:
+              - method: ".*"
+                path: /internal/.*
+
+---
+################################################################################
+# CiliumNetworkPolicy: EMQX ingress
+#
+# Allows:
+#   - Cilium Gateway -> EMQX :8083 (MQTT-over-WS)
+#   - Orchestrator -> EMQX :1883 (internal MQTT publish)
+#   - Deny all other ingress to EMQX broker ports
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: emqx-ingress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow-gateway
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: emqx
+
+  ingress:
+    # Cilium Gateway (reserved:ingress identity) -> EMQX WebSocket listener
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "8083"
+              protocol: TCP
+
+    # Orchestrator -> EMQX internal MQTT TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+
+    # Client pods -> EMQX internal MQTT TCP
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: client
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+
+    # XOFFICE backend -> EMQX internal MQTT TCP (cross-service notifications)
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: xoffice
+            app: xoffice-backend
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+
+    # EMQX cluster peers (headless DNS-based clustering)
+    - fromEndpoints:
+        - matchLabels:
+            app: emqx
+      toPorts:
+        - ports:
+            - port: "4370"   # EMQX cluster Erlang distribution
+              protocol: TCP
+            - port: "5369"   # EMQX cluster RPC
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: chatflow-web frontend ingress
+#
+# Allows:
+#   - Cilium Gateway (Envoy) -> chatflow-web :80 (Flutter SPA)
+#
+# Deny-by-default blocks all other ingress once this policy is applied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: chatflow-web-ingress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow-gateway
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: chatflow-web
+
+  ingress:
+    # Allow Cilium Gateway (reserved:ingress identity) -> chatflow-web HTTP
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: Postgres ingress
+#
+# Allows:
+#   - Orchestrator -> Postgres :5432
+#   - Client pods  -> Postgres :5432
+#
+# All other ingress to Postgres is denied once this policy is applied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow-gateway
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: whatsapp-microservice
+      app.kubernetes.io/component: database
+
+  ingress:
+    # Orchestrator -> Postgres
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+    # Client pods -> Postgres
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: client
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: Orchestrator egress
+#
+# Allows orchestrator to reach:
+#   - kube-dns           :53 UDP+TCP  (cluster DNS resolution)
+#   - Postgres           :5432        (database)
+#   - EMQX               :1883        (internal MQTT publish)
+#   - Speaches           :8000        (audio transcription)
+#   - world              :443 HTTPS   (XOFFICE webhooks, Firebase FCM, etc.)
+#
+# All other egress from orchestrator is denied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orchestrator-egress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow-gateway
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: orchestrator
+
+  egress:
+    # DNS resolution via kube-dns
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    # Postgres database
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: whatsapp-microservice
+            app.kubernetes.io/component: database
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+    # wa-client pods (orchestrator proxies /qr and other HTTP requests)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: client
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+    # EMQX internal MQTT
+    - toEndpoints:
+        - matchLabels:
+            app: emqx
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+
+    # Speaches transcription service
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: speaches
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+
+    # Kubernetes API server (orchestrator manages wa-client pods/services)
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+
+    # XOFFICE webhooks, Firebase FCM, and other external HTTPS
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

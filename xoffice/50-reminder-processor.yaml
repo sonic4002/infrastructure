@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xoffice-reminder-worker
+  namespace: xoffice
+  labels:
+    app: xoffice-reminder-worker
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: reminder-worker
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: xoffice-reminder-worker
+  template:
+    metadata:
+      labels:
+        app: xoffice-reminder-worker
+        app.kubernetes.io/name: xoffice
+        app.kubernetes.io/component: reminder-worker
+    spec:
+      containers:
+        - name: reminder-worker
+          image: sonic4002/digital_solutions:xoffice-backend-v209
+          imagePullPolicy: Always
+          command:
+            - python
+            - -m
+            - app.services.reminder_worker
+          envFrom:
+            - secretRef:
+                name: xoffice-secrets
+            - configMapRef:
+                name: xoffice-config
+          env:
+            - name: WORKER_POLL_INTERVAL_SECONDS
+              value: "30"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import os,time; assert time.time()-os.path.getmtime('/tmp/heartbeat')<120"
+            initialDelaySeconds: 45
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 5

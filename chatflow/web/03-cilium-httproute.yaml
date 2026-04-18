@@ -1,0 +1,30 @@
+---
+################################################################################
+# Cilium HTTPRoute supplement for Flutter web frontend
+#
+# The primary Gateway and HTTPRoutes for chatflowpro.live are defined in the
+# backend repo at:
+#   prod-k8s-deployment/cilium/01-gateway.yaml
+#   prod-k8s-deployment/cilium/05-httproutes-main-domain.yaml
+#
+# This file records a ReferenceGrant so the Gateway (also in chatflow namespace)
+# is permitted to reference chatflow-web-service.
+#
+# DO NOT delete whatsapp_v2_web/k8s/02-ingress.yaml until Phase 4.
+################################################################################
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-gateway-to-web-service
+  namespace: chatflow
+  labels:
+    app: chatflow-web
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: chatflow
+  to:
+    - group: ""
+      kind: Service
+      name: chatflow-web-service

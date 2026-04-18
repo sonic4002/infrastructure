@@ -1,0 +1,52 @@
+---
+# Headless service for StatefulSet DNS and clustering
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx-headless
+  namespace: chatflow
+  labels:
+    app: emqx
+spec:
+  clusterIP: None
+  selector:
+    app: emqx
+  ports:
+    - name: mqtt-tcp
+      port: 1883
+      targetPort: 1883
+    - name: mqtt-ws
+      port: 8083
+      targetPort: 8083
+    - name: mqtt-wss
+      port: 8084
+      targetPort: 8084
+    - name: mqtts
+      port: 8883
+      targetPort: 8883
+    - name: dashboard
+      port: 18083
+      targetPort: 18083
+---
+# ClusterIP service for internal access (orchestrator -> EMQX)
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx-service
+  namespace: chatflow
+  labels:
+    app: emqx
+spec:
+  type: ClusterIP
+  selector:
+    app: emqx
+  ports:
+    - name: mqtt-tcp
+      port: 1883
+      targetPort: 1883
+    - name: mqtt-ws
+      port: 8083
+      targetPort: 8083
+    - name: dashboard
+      port: 18083
+      targetPort: 18083

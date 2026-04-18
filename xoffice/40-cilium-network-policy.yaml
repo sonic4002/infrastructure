@@ -1,0 +1,283 @@
+---
+################################################################################
+# CiliumNetworkPolicy: xoffice backend ingress
+#
+# Allows:
+#   - Cilium Gateway (Envoy) -> xoffice-backend :8000 (REST API)
+#   - xoffice-frontend       -> xoffice-backend :8000 (SSR/BFF calls)
+#
+# Deny-by-default blocks all other ingress once this policy is applied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: xoffice-backend-ingress
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: xoffice-backend
+
+  ingress:
+    # Cilium Gateway (Envoy) -> xoffice-backend HTTP API
+    # Uses "ingress" entity because cilium-envoy runs in kube-system with
+    # hostNetwork, and Cilium assigns the reserved "ingress" identity to
+    # traffic originating from the Gateway proxy.
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+
+    # xoffice-frontend -> xoffice-backend (BFF / server-side API calls)
+    - fromEndpoints:
+        - matchLabels:
+            app: xoffice-frontend
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+
+    # chatflow orchestrator -> xoffice-backend (cross-service notifications)
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: chatflow
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: xoffice frontend ingress
+#
+# Allows:
+#   - Cilium Gateway (Envoy) -> xoffice-frontend :3000 (Next.js / SPA)
+#
+# Deny-by-default blocks all other ingress once this policy is applied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: xoffice-frontend-ingress
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: xoffice-frontend
+
+  ingress:
+    # Cilium Gateway (Envoy) -> xoffice-frontend
+    # Uses "ingress" entity because cilium-envoy runs in kube-system with
+    # hostNetwork, and Cilium assigns the reserved "ingress" identity to
+    # traffic originating from the Gateway proxy.
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: xoffice backend egress
+#
+# Allows xoffice-backend to reach:
+#   - kube-dns    :53 UDP+TCP  (cluster DNS resolution)
+#   - Postgres    :5432        (xoffice database)
+#   - Redis       :6379        (session/cache)
+#   - world       :443 HTTPS   (OAuth providers, external APIs)
+#
+# All other egress from xoffice-backend is denied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: xoffice-backend-egress
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: xoffice-backend
+
+  egress:
+    # DNS resolution via kube-dns
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    # Postgres database
+    - toEndpoints:
+        - matchLabels:
+            app: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+    # Redis cache
+    - toEndpoints:
+        - matchLabels:
+            app: redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+
+    # External HTTPS (OAuth, external APIs, EMQX callbacks)
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: xoffice reminder-processor egress
+#
+# Allows xoffice-reminder-worker to reach:
+#   - kube-dns    :53 UDP+TCP  (cluster DNS resolution)
+#   - Postgres    :5432        (xoffice database)
+#   - Redis       :6379        (encryption service / pubsub)
+#   - world       :443 HTTPS   (ChatFlow REST API, SMS, email providers)
+#
+# All other egress from xoffice-reminder-worker is denied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: xoffice-reminder-worker-egress
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: xoffice-reminder-worker
+
+  egress:
+    # DNS resolution via kube-dns
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    # Postgres database
+    - toEndpoints:
+        - matchLabels:
+            app: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+    # Redis cache
+    - toEndpoints:
+        - matchLabels:
+            app: redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
+
+    # External HTTPS (ChatFlow REST API, Twilio, SendGrid)
+    - toEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: Postgres ingress (xoffice)
+#
+# Allows:
+#   - xoffice-backend -> Postgres :5432
+#   - xoffice-reminder-worker -> Postgres :5432
+#
+# All other ingress to Postgres is denied once this policy is applied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: xoffice-postgres-ingress
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: postgres
+
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: xoffice-backend
+        - matchLabels:
+            app: xoffice-reminder-worker
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: Redis ingress (xoffice)
+#
+# Allows:
+#   - xoffice-backend -> Redis :6379
+#   - xoffice-reminder-worker -> Redis :6379
+#
+# All other ingress to Redis is denied once this policy is applied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: xoffice-redis-ingress
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: redis
+
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: xoffice-backend
+        - matchLabels:
+            app: xoffice-reminder-worker
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP

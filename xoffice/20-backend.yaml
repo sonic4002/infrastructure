@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: xoffice-backend
+  namespace: xoffice
+  labels:
+    app: xoffice-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: xoffice-backend
+  template:
+    metadata:
+      labels:
+        app: xoffice-backend
+    spec:
+      volumes:
+        - name: avatars-storage
+          persistentVolumeClaim:
+            claimName: xoffice-avatars-pvc
+      containers:
+        - name: backend
+          image: sonic4002/digital_solutions:xoffice-backend-v209
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: xoffice-secrets
+            - configMapRef:
+                name: xoffice-config
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: avatars-storage
+              mountPath: /data/avatars
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: xoffice-backend-service
+  namespace: xoffice
+spec:
+  selector:
+    app: xoffice-backend
+  ports:
+    - port: 80
+      targetPort: 8000
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: xoffice-backend-hpa
+  namespace: xoffice
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: xoffice-backend
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

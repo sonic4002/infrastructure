@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: emqx
+  namespace: chatflow
+  labels:
+    app: emqx
+spec:
+  serviceName: emqx-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: emqx
+  template:
+    metadata:
+      labels:
+        app: emqx
+    spec:
+      containers:
+        - name: emqx
+          image: emqx/emqx:5.5.1
+          ports:
+            - name: mqtt-tcp
+              containerPort: 1883
+              protocol: TCP
+            - name: mqtt-ws
+              containerPort: 8083
+              protocol: TCP
+            - name: mqtt-wss
+              containerPort: 8084
+              protocol: TCP
+            - name: mqtts
+              containerPort: 8883
+              protocol: TCP
+            - name: dashboard
+              containerPort: 18083
+              protocol: TCP
+          env:
+            - name: EMQX_NAME
+              value: emqx
+            - name: EMQX_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "200m"
+            limits:
+              memory: "2Gi"
+              cpu: "1"
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 18083
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 18083
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: emqx-data
+              mountPath: /opt/emqx/data
+            - name: emqx-config
+              mountPath: /opt/emqx/etc/emqx.conf
+              subPath: emqx.conf
+            - name: emqx-tls
+              mountPath: /opt/emqx/etc/certs
+              readOnly: true
+      volumes:
+        - name: emqx-config
+          configMap:
+            name: emqx-config
+        - name: emqx-tls
+          secret:
+            secretName: mqtt-tls-secret
+            optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: emqx-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi

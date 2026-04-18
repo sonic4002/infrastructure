@@ -1,0 +1,52 @@
+---
+# ConfigMap for WhatsApp Microservice
+# Contains non-sensitive configuration data
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: whatsapp-config
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: configuration
+    environment: production
+data:
+  # Server Configuration
+  SERVER_PORT: "8080"
+  SERVER_HOST: "0.0.0.0"
+
+  # Environment
+  ENVIRONMENT: "production"
+
+  # Database Configuration (non-sensitive parts)
+  # The actual credentials come from secrets
+  DATABASE_HOST: "postgres-service"
+  DATABASE_PORT: "5432"
+  DATABASE_SSL_MODE: "disable"
+
+  # WhatsApp Session Configuration
+  SESSION_ENCRYPTION_ENABLED: "true"
+
+  # Data Directory
+  DATA_DIR: "/data/whatsapp"
+
+  # Logging Configuration
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+
+  # Health Check Configuration
+  HEALTH_CHECK_PATH: "/health"
+
+  # Performance Tuning
+  MAX_CONNECTIONS: "100"
+  CONNECTION_TIMEOUT: "30s"
+  IDLE_TIMEOUT: "60s"
+
+  # Rate Limiting (if applicable)
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_REQUESTS: "100"
+  RATE_LIMIT_WINDOW: "1m"
+
+  # Twilio SMS (non-sensitive -- phone number and app hash)
+  TWILIO_FROM_NUMBER: "ChatFlow"
+  SMS_APP_HASH: "cPDAJHO2zf0"

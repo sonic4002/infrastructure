@@ -1,0 +1,63 @@
+---
+################################################################################
+# ResourceQuota for chatflow Namespace
+# Prevents resource exhaustion and ensures fair resource allocation
+################################################################################
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: chatflow-resource-quota
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/part-of: whatsapp-platform
+    app.kubernetes.io/managed-by: kubectl
+
+spec:
+  hard:
+    # Pod limits
+    pods: "12"                    # Max 12 pods in namespace (+2 for EMQX)
+
+    # CPU limits
+    requests.cpu: "5"             # Total CPU requests across all pods (+1 for EMQX)
+    limits.cpu: "10"              # Total CPU limits across all pods (+2 for EMQX)
+
+    # Memory limits (increased for whisper-large model in Speaches + EMQX broker)
+    requests.memory: "10Gi"       # Total memory requests across all pods (+2Gi for EMQX)
+    limits.memory: "20Gi"         # Total memory limits across all pods (+4Gi for EMQX)
+
+    # Storage limits (for PVCs)
+    requests.storage: "22Gi"      # Total storage requests (+2Gi for EMQX PVC)
+    persistentvolumeclaims: "6"   # Max 6 PVCs (+1 for EMQX)
+
+    # Service limits
+    services: "14"                # Max 14 services (+4 for EMQX: headless, clusterip, external, route)
+    services.loadbalancers: "3"   # Max 3 LoadBalancer services (+1 for EMQX external)
+    services.nodeports: "3"       # Max 3 NodePort services
+
+    # Config/Secret limits
+    configmaps: "22"              # Max 22 ConfigMaps (+2 for EMQX)
+    secrets: "22"                 # Max 22 Secrets (+2 for EMQX)
+
+################################################################################
+# Usage Notes:
+#
+# 1. Check current quota usage:
+#    kubectl describe resourcequota chatflow-resource-quota -n xoffice
+#
+# 2. If quota is exceeded, new pods will fail to schedule with error:
+#    "exceeded quota: chatflow-resource-quota"
+#
+# 3. To temporarily increase quota (for scaling):
+#    kubectl patch resourcequota chatflow-resource-quota -n xoffice \
+#      --patch '{"spec":{"hard":{"pods":"20"}}}'
+#
+# 4. Current resource allocation breakdown:
+#    - Orchestrator: 100m-500m CPU, 128Mi-512Mi memory
+#    - Client pods: 250m-1000m CPU, 512Mi-1Gi memory (each)
+#    - PostgreSQL: 500m-2000m CPU, 1Gi-2Gi memory
+#    - EMQX broker: 200m-1000m CPU, 1Gi-2Gi memory
+#
+# 5. With these limits, namespace can support approximately:
+#    - 1 orchestrator + 1 postgres + 1 EMQX + ~4-5 client pods
+################################################################################

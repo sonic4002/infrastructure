@@ -1,0 +1,127 @@
+---
+################################################################################
+# CiliumNetworkPolicy: platform-gateway ingress
+#
+# Namespace: gateway
+#
+# Allows:
+#   - External world -> Envoy :80 (Cloudflare proxied traffic)
+#
+# All other ingress to gateway Envoy pods is denied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: gateway-ingress
+  namespace: gateway
+  labels:
+    app.kubernetes.io/name: platform-gateway
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: cilium-envoy
+
+  ingress:
+    # Cloudflare / external world -> gateway HTTP listener
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+
+---
+################################################################################
+# CiliumNetworkPolicy: platform-gateway egress
+#
+# Namespace: gateway
+#
+# Allows Cilium Envoy to reach only the backend services it explicitly routes:
+#   - chatflow namespace:
+#       orchestrator-service   :8080  (API + WebSocket + /internal)
+#       chatflow-web-service   :80    (Flutter SPA)
+#       emqx-service           :8083  (MQTT-over-WebSocket)
+#   - xoffice namespace:
+#       xoffice-backend-service  :8000  (REST API)
+#       xoffice-frontend-service :3000  (Next.js frontend)
+#   - kube-system:
+#       kube-dns :53 UDP+TCP (DNS resolution for backend service names)
+#
+# All other egress from gateway Envoy pods is denied.
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: gateway-egress
+  namespace: gateway
+  labels:
+    app.kubernetes.io/name: platform-gateway
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: cilium-envoy
+
+  egress:
+    # DNS resolution via kube-dns
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+    # chatflow: orchestrator (REST API + WebSocket + /internal callbacks)
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: chatflow
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+    # chatflow: chatflow-web Flutter SPA
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: chatflow
+            app: chatflow-web
+      toPorts:
+        - ports:
+            - port: "80"
+              protocol: TCP
+
+    # chatflow: EMQX MQTT-over-WebSocket listener
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: chatflow
+            app: emqx
+      toPorts:
+        - ports:
+            - port: "8083"
+              protocol: TCP
+
+    # xoffice: backend API service
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: xoffice
+            app: xoffice-backend
+      toPorts:
+        - ports:
+            - port: "8000"
+              protocol: TCP
+
+    # xoffice: frontend service (Next.js)
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: xoffice
+            app: xoffice-frontend
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP

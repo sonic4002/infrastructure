@@ -1,0 +1,45 @@
+---
+################################################################################
+# PodDisruptionBudget for Orchestrator Service
+# Ensures high availability during voluntary disruptions (node drains, upgrades)
+################################################################################
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orchestrator-pdb
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: whatsapp-platform
+    app.kubernetes.io/managed-by: kubectl
+
+spec:
+  # Ensure at least 1 pod is always available during voluntary disruptions
+  # This prevents complete service outage during:
+  #   - Node drains for maintenance
+  #   - Cluster upgrades
+  #   - Pod evictions for resource reclaim
+  minAvailable: 1
+
+  # Selector must match the orchestrator deployment
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: whatsapp-microservice
+      app.kubernetes.io/component: orchestrator
+
+################################################################################
+# Usage Notes:
+#
+# 1. With replicas: 1, this PDB will BLOCK voluntary evictions entirely
+#    Scale to replicas: 2 before performing node maintenance
+#
+# 2. To temporarily allow eviction (for emergency maintenance):
+#    kubectl delete pdb orchestrator-pdb -n xoffice
+#
+# 3. Check PDB status:
+#    kubectl get pdb orchestrator-pdb -n xoffice -o yaml
+#
+# 4. Check disruption budget during drain:
+#    kubectl drain <node> --dry-run=client
+################################################################################

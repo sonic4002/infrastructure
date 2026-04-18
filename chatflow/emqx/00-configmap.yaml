@@ -1,0 +1,125 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: emqx-config
+  namespace: chatflow
+  labels:
+    app: emqx
+data:
+  emqx.conf: |
+    node {
+      cookie = "chatflow-emqx-secret-cookie"
+      data_dir = "/opt/emqx/data"
+    }
+
+    cluster {
+      discovery_strategy = dns
+      dns {
+        record_type = srv
+        name = "emqx-headless.chatflow.svc.cluster.local"
+      }
+    }
+
+    listeners.tcp.default {
+      bind = "0.0.0.0:1883"
+      max_connections = 10000
+    }
+
+    listeners.ws.default {
+      bind = "0.0.0.0:8083"
+      max_connections = 10000
+      websocket {
+        mqtt_path = "/mqtt"
+      }
+    }
+
+    ## Explicitly disable TLS listeners until cert-manager is installed
+    listeners.wss.default {
+      enable = false
+    }
+
+    listeners.ssl.default {
+      enable = false
+    }
+
+    authentication = [{
+      mechanism = password_based
+      backend = http
+      method = post
+      url = "http://orchestrator-service.chatflow.svc.cluster.local:8080/api/v1/mqtt/auth"
+      body {
+        username = "${username}"
+        password = "${password}"
+      }
+      headers {
+        "Content-Type" = "application/json"
+      }
+      connect_timeout = "5s"
+      request_timeout = "5s"
+      enable = true
+    }]
+
+    authorization {
+      no_match = deny
+      sources = [{
+        type = http
+        method = post
+        url = "http://orchestrator-service.chatflow.svc.cluster.local:8080/api/v1/mqtt/acl"
+        body {
+          username = "${username}"
+          topic = "${topic}"
+          action = "${action}"
+        }
+        headers {
+          "Content-Type" = "application/json"
+        }
+        connect_timeout = "5s"
+        request_timeout = "5s"
+        enable = true
+      }]
+    }
+
+    ## MQTT session settings
+    ##
+    ## Service client requirements (svc:* prefixed clients):
+    ##   - MUST connect with clean_session=false to enable persistent sessions.
+    ##     This ensures messages published while the service is temporarily
+    ##     disconnected (e.g., during deployment restarts) are queued and
+    ##     delivered upon reconnection.
+    ##   - MUST use a stable, deterministic client ID (e.g., "svc-xoffice-prod")
+    ##     so EMQX can resume the existing session on reconnect.
+    ##   - SHOULD subscribe with QoS 1 for reliable at-least-once delivery.
+    ##   - The session_expiry_interval below (30m) covers typical deployment
+    ##     restart windows where pods restart within seconds.
+    mqtt {
+      max_mqueue_len = 1000
+      max_inflight = 100
+      max_packet_size = "64KB"
+      idle_timeout = "60s"
+      max_topic_alias = 65535
+      retry_interval = "30s"
+      session_expiry_interval = "30m"
+    }
+
+    retainer {
+      enable = true
+      max_payload_size = "4KB"
+      msg_expiry_interval = "1h"
+      flow_control {
+        batch_deliver_number = 100
+      }
+    }
+
+    dashboard {
+      listeners.http {
+        bind = "0.0.0.0:18083"
+      }
+      default_username = "admin"
+      default_password = "chatflow-emqx-admin"
+    }
+
+    log {
+      console {
+        level = info
+      }
+    }

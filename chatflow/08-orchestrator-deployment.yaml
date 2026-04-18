@@ -1,0 +1,438 @@
+---
+################################################################################
+# Orchestrator Service Deployment
+# Multi-tenant WhatsApp service orchestrator that manages dynamic client pods
+################################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: whatsapp-orchestrator
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/version: "2.15.2"
+    app.kubernetes.io/part-of: whatsapp-platform
+    app.kubernetes.io/managed-by: kubectl
+
+spec:
+  # Single replica to conserve memory
+  replicas: 1
+
+  # Rolling update strategy for zero-downtime deployments
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # Allow one extra pod during updates
+      maxUnavailable: 0  # Ensure at least 1 pod always running
+
+  # Selector for orchestrator pods
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: whatsapp-microservice
+      app.kubernetes.io/component: orchestrator
+
+  # Pod template
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: whatsapp-microservice
+        app.kubernetes.io/component: orchestrator
+        app.kubernetes.io/version: "2.15.2"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+
+    spec:
+      # Service account with pod management permissions
+      serviceAccountName: orchestrator-sa
+
+      # Image pull secrets for Docker Hub
+      imagePullSecrets:
+        - name: dockerhub-secret
+
+      # Security context for the pod
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      # Init container to wait for database to be ready
+      initContainers:
+        - name: wait-for-postgres
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for PostgreSQL to be ready..."
+              until nc -z postgres-service 5432; do
+                echo "Waiting for postgres-service:5432..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready!"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
+
+      # Main orchestrator container
+      containers:
+        - name: orchestrator
+          image: sonic4002/digital_solutions:whatsapp-orchestrator-v2.15.2
+          imagePullPolicy: Always
+
+          # Security context for container
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true  # Orchestrator is stateless
+            capabilities:
+              drop:
+                - ALL
+
+          # Environment variables
+          env:
+            # Service configuration
+            - name: PORT
+              value: "8080"
+            - name: ENV
+              value: "production"
+            - name: NAMESPACE
+              value: "chatflow"
+            - name: EXTERNAL_BASE_URL
+              value: "https://api.chatflowpro.live/api/v1"
+
+            # Database configuration from secrets
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-db-secret
+                  key: DB_USER
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-db-secret
+                  key: DB_PASSWORD
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-db-secret
+                  key: DB_HOST
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-db-secret
+                  key: DB_NAME
+            - name: DB_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-db-secret
+                  key: DB_PORT
+
+            # Construct DATABASE_URL from components
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=disable"
+
+            # Pod lifecycle configuration
+            - name: QR_TIMEOUT
+              value: "1h"
+            - name: DISCONNECT_TIMEOUT
+              value: "24h"
+            - name: POD_STARTUP_TIMEOUT
+              value: "30s"
+
+            # Media storage
+            - name: MEDIA_STORAGE_PATH
+              value: "/data/media"
+
+            # Firebase/FCM configuration (optional - for push notifications)
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/etc/firebase/firebase-credentials.json"
+
+            # Phase 2.3: JWT secret for phone-based auth tokens
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-jwt-secret
+                  key: JWT_SECRET
+                  optional: true  # Will use default if not set
+
+            # Phase 9: XOFFICE Integration API key
+            - name: XOFFICE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: xoffice-integration-secret
+                  key: XOFFICE_API_KEY
+                  optional: true  # Will fail auth if not set
+
+            # XOFFICE callback secret - signs HMAC-SHA256 on connection callbacks
+            - name: XOFFICE_CALLBACK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: xoffice-integration-secret
+                  key: XOFFICE_CALLBACK_SECRET
+                  optional: true
+
+            # XOFFICE webhook deprecation flag
+            # Set to "true" after 48h of MQTT validation to disable outbound HTTP webhooks.
+            # All task notifications will be routed via MQTT instead.
+            # After another 48h with no issues, XOFFICE_WEBHOOK_URL and
+            # XOFFICE_WEBHOOK_SECRET can be removed entirely.
+            - name: XOFFICE_WEBHOOK_DEPRECATED
+              value: "false"
+
+            # XOFFICE webhook URL - where to send task change notifications
+            - name: XOFFICE_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: xoffice-integration-secret
+                  key: XOFFICE_WEBHOOK_URL
+                  optional: true
+            # XOFFICE webhook secret - signs outgoing webhooks with HMAC-SHA256
+            - name: XOFFICE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: xoffice-integration-secret
+                  key: XOFFICE_WEBHOOK_SECRET
+                  optional: true
+
+            # Transcription service configuration (faster-whisper-server)
+            # Uses OpenAI-compatible API: /v1/audio/transcriptions
+            - name: SPEACHES_URL
+              value: "http://speaches-service.chatflow.svc.cluster.local:8000/v1/audio/transcriptions"
+            - name: TRANSCRIPTION_MODEL
+              value: "ivrit-ai/whisper-large-v3-turbo-ct2"
+            - name: TRANSCRIPTION_LANGUAGE
+              value: "he"
+
+            # MQTT configuration
+            - name: MQTT_ENABLED
+              value: "true"
+            - name: MQTT_BROKER_URL
+              value: "tcp://emqx-service.chatflow.svc.cluster.local:1883"
+            - name: MQTT_SUPERUSER_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: emqx-orchestrator-credentials
+                  key: MQTT_SUPERUSER_USERNAME
+            - name: MQTT_SUPERUSER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: emqx-orchestrator-credentials
+                  key: MQTT_SUPERUSER_PASSWORD
+            - name: MQTT_SERVICE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: emqx-orchestrator-credentials
+                  key: MQTT_SERVICE_SECRET
+            - name: MQTT_SERVICE_SECRETS
+              valueFrom:
+                secretKeyRef:
+                  name: emqx-orchestrator-credentials
+                  key: MQTT_SERVICE_SECRETS
+                  optional: true  # Falls back to MQTT_SERVICE_SECRET if not set
+
+            # Twilio SMS (optional -- OTP send returns 503 if not configured)
+            - name: TWILIO_ACCOUNT_SID
+              valueFrom:
+                secretKeyRef:
+                  name: twilio-secret
+                  key: TWILIO_ACCOUNT_SID
+                  optional: true
+            - name: TWILIO_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: twilio-secret
+                  key: TWILIO_AUTH_TOKEN
+                  optional: true
+            - name: TWILIO_FROM_NUMBER
+              valueFrom:
+                configMapKeyRef:
+                  name: whatsapp-config
+                  key: TWILIO_FROM_NUMBER
+            - name: SMS_APP_HASH
+              valueFrom:
+                configMapKeyRef:
+                  name: whatsapp-config
+                  key: SMS_APP_HASH
+
+            # VAPID Web Push (optional -- web push disabled if not configured)
+            - name: VAPID_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vapid-secret
+                  key: VAPID_PUBLIC_KEY
+                  optional: true
+            - name: VAPID_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vapid-secret
+                  key: VAPID_PRIVATE_KEY
+                  optional: true
+            - name: VAPID_SUBJECT
+              valueFrom:
+                secretKeyRef:
+                  name: vapid-secret
+                  key: VAPID_SUBJECT
+                  optional: true
+
+            # Client pod configuration
+            - name: CLIENT_POD_IMAGE
+              value: "sonic4002/digital_solutions"
+            - name: CLIENT_POD_VERSION
+              value: "whatsapp-client-v2.4.12"
+            - name: CLIENT_POD_CPU_REQUEST
+              value: "250m"
+            - name: CLIENT_POD_MEMORY_REQUEST
+              value: "512Mi"
+            - name: CLIENT_POD_CPU_LIMIT
+              value: "1000m"
+            - name: CLIENT_POD_MEMORY_LIMIT
+              value: "1Gi"
+
+          # Container ports
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          # Volume mounts for temp directory (read-only root filesystem)
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/.cache
+            - name: media-storage
+              mountPath: /data
+            - name: firebase-credentials
+              mountPath: /etc/firebase
+              readOnly: true
+
+          # Resource limits and requests
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+          # Liveness probe - checks if orchestrator is alive
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 3
+
+          # Readiness probe - checks if ready to serve traffic
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            successThreshold: 1
+            failureThreshold: 3
+
+          # Startup probe - allow 30s max for DB connection (15 failures x 2s)
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 15  # Allow up to 30 seconds for startup
+
+      # Volumes
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}
+        - name: media-storage
+          persistentVolumeClaim:
+            claimName: media-storage
+        - name: firebase-credentials
+          secret:
+            secretName: firebase-credentials
+            optional: true  # Don't fail if secret doesn't exist (FCM is optional)
+
+      # DNS configuration
+      dnsPolicy: ClusterFirst
+
+      # Restart policy
+      restartPolicy: Always
+
+      # Termination grace period
+      terminationGracePeriodSeconds: 30
+
+      # Pod anti-affinity for high availability
+      # Prefer to schedule orchestrator pods on different nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app.kubernetes.io/component
+                      operator: In
+                      values:
+                        - orchestrator
+                topologyKey: kubernetes.io/hostname
+
+---
+################################################################################
+# Orchestrator Database Secret Template
+################################################################################
+# IMPORTANT: This is a TEMPLATE. Create the actual secret using:
+#
+# kubectl create secret generic orchestrator-db-secret \
+#   --from-literal=DB_USER=postgres \
+#   --from-literal=DB_PASSWORD=<strong-password> \
+#   --from-literal=DB_HOST=postgres-service \
+#   --from-literal=DB_NAME=whatsapp_db \
+#   --from-literal=DB_PORT=5432 \
+#   -n xoffice
+#
+# Or uncomment and base64 encode the values below:
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: orchestrator-db-secret
+#   namespace: chatflow
+#   labels:
+#     app.kubernetes.io/name: whatsapp-microservice
+#     app.kubernetes.io/component: orchestrator
+# type: Opaque
+# data:
+#   DB_USER: <base64-encoded-username>
+#   DB_PASSWORD: <base64-encoded-password>
+#   DB_HOST: <base64-encoded-host>
+#   DB_NAME: <base64-encoded-database>
+#   DB_PORT: <base64-encoded-port>
+################################################################################

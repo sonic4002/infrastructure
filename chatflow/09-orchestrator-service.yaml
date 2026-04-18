@@ -1,0 +1,69 @@
+---
+################################################################################
+# Orchestrator Service
+# ClusterIP service for internal access to the orchestrator
+################################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/part-of: whatsapp-platform
+    app.kubernetes.io/managed-by: kubectl
+
+spec:
+  type: ClusterIP
+
+  # Session affinity for stateful operations (optional)
+  # The orchestrator is stateless, but this can help with debugging
+  sessionAffinity: None
+
+  # Selector to match orchestrator pods
+  selector:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: orchestrator
+
+  # Ports
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080        # Service port
+      targetPort: http  # Container port name
+      # Optional: uncomment for NodePort access (debugging)
+      # nodePort: 30080
+
+  # IP family configuration
+  ipFamilies:
+    - IPv4
+  ipFamilyPolicy: SingleStack
+
+---
+################################################################################
+# Orchestrator Service Monitor (for Prometheus)
+# Automatically discovered by Prometheus Operator if installed
+################################################################################
+# Uncomment if using Prometheus Operator
+#
+# apiVersion: monitoring.coreos.com/v1
+# kind: ServiceMonitor
+# metadata:
+#   name: orchestrator-metrics
+#   namespace: chatflow
+#   labels:
+#     app.kubernetes.io/name: whatsapp-microservice
+#     app.kubernetes.io/component: orchestrator
+# spec:
+#   selector:
+#     matchLabels:
+#       app.kubernetes.io/name: whatsapp-microservice
+#       app.kubernetes.io/component: orchestrator
+#   endpoints:
+#     - port: http
+#       path: /metrics
+#       interval: 30s
+#       scrapeTimeout: 10s
+################################################################################

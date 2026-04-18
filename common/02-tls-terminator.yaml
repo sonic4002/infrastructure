@@ -1,0 +1,97 @@
+---
+################################################################################
+# TLS Terminator - nginx stream proxy for Cloudflare Full SSL mode
+#
+# Namespace: kube-system
+# Mode: hostNetwork DaemonSet
+#
+# Problem: Cloudflare xoffice.cloud zone uses Full SSL mode, which connects
+# to origin on port 443 with HTTPS. Cilium Gateway only listens on port 80.
+# This nginx stream proxy terminates TLS on port 443 and forwards the
+# decrypted TCP stream to Envoy on port 80 (localhost).
+#
+# The self-signed cert is acceptable because Cloudflare "Full" (not "Strict")
+# does not verify the origin certificate.
+#
+# To generate the TLS secret:
+#   openssl req -x509 -newkey rsa:2048 \
+#     -keyout tls.key -out tls.crt -days 365 -nodes \
+#     -subj "/CN=xoffice.cloud" \
+#     -addext "subjectAltName=DNS:xoffice.cloud,DNS:api.xoffice.cloud,DNS:*.xoffice.cloud"
+#   kubectl create secret tls tls-terminator-cert \
+#     --cert=tls.crt --key=tls.key -n kube-system
+#
+# Long-term fix: Change Cloudflare xoffice.cloud SSL mode to Flexible (HTTP
+# to origin) to match chatflowpro.live, then remove this DaemonSet.
+################################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tls-terminator-config
+  namespace: kube-system
+data:
+  nginx.conf: |
+    worker_processes 2;
+    error_log /dev/stderr warn;
+    events { worker_connections 1024; }
+    stream {
+      upstream envoy_http {
+        server 127.0.0.1:80;
+      }
+      server {
+        listen 443 ssl;
+        ssl_certificate /etc/tls/tls.crt;
+        ssl_certificate_key /etc/tls/tls.key;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        proxy_pass envoy_http;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: tls-terminator
+  namespace: kube-system
+  labels:
+    app: tls-terminator
+spec:
+  selector:
+    matchLabels:
+      app: tls-terminator
+  template:
+    metadata:
+      labels:
+        app: tls-terminator
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/os: linux
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 443
+              hostPort: 443
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+            - name: tls
+              mountPath: /etc/tls
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+      volumes:
+        - name: config
+          configMap:
+            name: tls-terminator-config
+        - name: tls
+          secret:
+            secretName: tls-terminator-cert

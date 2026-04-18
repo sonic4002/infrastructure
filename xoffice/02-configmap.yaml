@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: xoffice-config
+  namespace: xoffice
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+  INVITE_OTP_DEBUG: "true"
+  # CORS_ORIGINS is in the secret (xoffice-secrets) with the full list
+  NEXT_PUBLIC_API_URL: "https://api.xoffice.cloud"
+  API_URL: "https://api.xoffice.cloud"
+  # MQTT Integration (cross-service notifications via EMQX)
+  MQTT_ENABLED: "true"
+  MQTT_BROKER_URL: "tcp://emqx-service.chatflow.svc.cluster.local:1883"
+  MQTT_CLIENT_ID: "xoffice-backend"
+  # Web Push VAPID (public key is not sensitive)
+  # IMPORTANT: Replace with the actual generated VAPID public key matching the private key in xoffice-secrets
+  VAPID_PUBLIC_KEY: "REPLACE_WITH_GENERATED_VAPID_PUBLIC_KEY"
+  VAPID_CONTACT_EMAIL: "mailto:admin@xoffice.cloud"

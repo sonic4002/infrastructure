@@ -1,0 +1,85 @@
+---
+################################################################################
+# ChatFlow Web Frontend - Flutter Web App
+# Deployment + Service + HPA
+################################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatflow-web
+  namespace: chatflow
+  labels:
+    app: chatflow-web
+    app.kubernetes.io/name: chatflow-web
+    app.kubernetes.io/component: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chatflow-web
+  template:
+    metadata:
+      labels:
+        app: chatflow-web
+    spec:
+      containers:
+        - name: web
+          image: sonic4002/digital_solutions:chatflow-web-v17
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      imagePullSecrets:
+        - name: dockerhub-secret
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatflow-web-service
+  namespace: chatflow
+  labels:
+    app: chatflow-web
+spec:
+  selector:
+    app: chatflow-web
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: chatflow-web-hpa
+  namespace: chatflow
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: chatflow-web
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

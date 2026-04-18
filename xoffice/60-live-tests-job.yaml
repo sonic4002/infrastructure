@@ -1,0 +1,28 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: xoffice-live-tests
+  namespace: xoffice
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: xoffice-backend
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: live-tests
+          image: sonic4002/digital_solutions:xoffice-tests-v11
+          imagePullPolicy: Always
+          envFrom:
+            - secretRef:
+                name: xoffice-test-secrets
+          env:
+            - name: TEST_BASE_URL
+              value: "https://api.xoffice.cloud"
+            - name: TEST_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: xoffice-secrets
+                  key: DATABASE_URL

@@ -1,0 +1,28 @@
+---
+# Cilium Gateway API HTTPRoute for mqtt.chatflowpro.live
+# Routes WSS traffic to EMQX WebSocket listener
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: emqx-mqtt-route
+  namespace: chatflow
+  labels:
+    app: emqx
+spec:
+  parentRefs:
+    - name: whatsapp-gateway
+      namespace: chatflow
+      sectionName: http-mqtt
+  hostnames:
+    - "mqtt.chatflowpro.live"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mqtt
+      backendRefs:
+        - name: emqx-service
+          port: 8083
+      timeouts:
+        request: "0s"
+        backendRequest: "0s"

@@ -1,0 +1,26 @@
+# ============================================================================
+# Media Storage PVC for Audio/Image/Video Files
+# ============================================================================
+# Provides persistent storage for downloaded WhatsApp media files
+# Used by the orchestrator for audio transcription and media serving
+#
+# Retention policies:
+#   - Audio: 48 hours (for transcription processing)
+#   - Images/Videos/Documents: 60 days
+# ============================================================================
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: media-storage
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-orchestrator
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: local-path

@@ -1,0 +1,15 @@
+# Secrets directory (backed up out-of-band; never committed)
+secrets/
+
+# Secret manifests with real values (keep a copy in secrets/ backup)
+chatflow/01-secrets.yaml
+
+# IDE / project tooling
+.idea/
+*.iml
+
+# Moe task state (local per machine)
+.moe/
+
+# OS junk
+.DS_Store

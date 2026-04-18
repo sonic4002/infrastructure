@@ -1,0 +1,90 @@
+---
+################################################################################
+# Consolidated Cilium Gateway - Single LB IP for all platform traffic
+#
+# Namespace: gateway (shared infrastructure)
+# TLS: Cloudflare Flexible mode (edge termination). All listeners are HTTP/80.
+#
+# Domains:
+#   chatflow:  api.chatflowpro.live, chatflowpro.live, mqtt.chatflowpro.live
+#   xoffice:   xoffice.cloud, api.xoffice.cloud
+#
+# HTTPRoutes live in their respective app namespaces (chatflow, xoffice).
+# Each listener uses a namespace selector to control which namespaces can
+# attach routes.
+################################################################################
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: platform-gateway
+  namespace: gateway
+  labels:
+    app.kubernetes.io/name: platform-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/managed-by: cilium
+spec:
+  gatewayClassName: cilium
+
+  listeners:
+    # =========================================================================
+    # CHATFLOW (namespace: chatflow)
+    # =========================================================================
+
+    - name: chatflow-api
+      protocol: HTTP
+      port: 80
+      hostname: "api.chatflowpro.live"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/part-of: chatflow
+
+    - name: chatflow-web
+      protocol: HTTP
+      port: 80
+      hostname: "chatflowpro.live"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/part-of: chatflow
+
+    - name: chatflow-mqtt
+      protocol: HTTP
+      port: 80
+      hostname: "mqtt.chatflowpro.live"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/part-of: chatflow
+
+    # =========================================================================
+    # XOFFICE (namespace: xoffice)
+    # =========================================================================
+
+    - name: xoffice-frontend
+      protocol: HTTP
+      port: 80
+      hostname: "xoffice.cloud"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: xoffice
+
+    - name: xoffice-api
+      protocol: HTTP
+      port: 80
+      hostname: "api.xoffice.cloud"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: xoffice

@@ -1,0 +1,14 @@
+---
+# cert-manager Certificate for mqtt.chatflowpro.live
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mqtt-tls-cert
+  namespace: chatflow
+spec:
+  secretName: mqtt-tls-secret
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - mqtt.chatflowpro.live

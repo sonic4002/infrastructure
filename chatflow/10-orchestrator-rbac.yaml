@@ -1,0 +1,119 @@
+---
+################################################################################
+# RBAC Configuration for WhatsApp Orchestrator
+# Grants the orchestrator service account permissions to manage client pods
+################################################################################
+
+---
+# ServiceAccount for the orchestrator
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator-sa
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/part-of: whatsapp-platform
+    app.kubernetes.io/managed-by: kubectl
+automountServiceAccountToken: true
+
+---
+# Role with permissions to manage pods, deployments, and services
+# Scoped to xoffice namespace only (principle of least privilege)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orchestrator-role
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/part-of: whatsapp-platform
+    app.kubernetes.io/managed-by: kubectl
+rules:
+  # Permissions for managing deployments (create/delete client pods)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Permissions for managing services (create/delete pod services)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  # Permissions for managing pods (create/delete client pods, check readiness, health)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+  # Permissions to read pod logs (for debugging)
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+
+  # Permissions to read pod status
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get"]
+
+---
+# RoleBinding - binds the role to the service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator-binding
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/part-of: whatsapp-platform
+    app.kubernetes.io/managed-by: kubectl
+subjects:
+  - kind: ServiceAccount
+    name: orchestrator-sa
+    namespace: chatflow
+roleRef:
+  kind: Role
+  name: orchestrator-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+################################################################################
+# Security Notes:
+#
+# 1. Least Privilege:
+#    - ServiceAccount is scoped to xoffice namespace only
+#    - No cluster-wide permissions granted
+#    - Only necessary Kubernetes resources are accessible
+#
+# 2. Permissions Breakdown:
+#    - deployments: Create/delete dynamic WhatsApp client pods
+#    - services: Create/delete ClusterIP services for each client pod
+#    - pods: Read-only access to monitor pod status and readiness
+#    - pods/log: Read logs for debugging (optional, can be removed)
+#
+# 3. What the Orchestrator CANNOT Do:
+#    - Modify other namespaces
+#    - Access secrets (except those mounted to its own pod)
+#    - Modify RBAC settings
+#    - Delete StatefulSets or DaemonSets
+#    - Access node-level resources
+#
+# 4. Audit Trail:
+#    - All pod creation/deletion actions are logged in Kubernetes audit logs
+#    - Use kubectl to track orchestrator actions:
+#      kubectl get events -n xoffice --field-selector involvedObject.kind=Deployment
+#
+# 5. Monitoring RBAC Usage:
+#    - Check ServiceAccount token usage:
+#      kubectl describe sa orchestrator-sa -n xoffice
+#    - Review role permissions:
+#      kubectl describe role orchestrator-role -n xoffice
+#    - Check role bindings:
+#      kubectl describe rolebinding orchestrator-binding -n xoffice
+#
+################################################################################

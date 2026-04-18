@@ -1,0 +1,90 @@
+# XOFFICE HTTPRoutes
+#
+# Attach to the shared platform-gateway in the gateway namespace.
+# The Gateway's xoffice listeners use namespace selector:
+#   matchLabels: { app.kubernetes.io/name: xoffice }
+# which matches the xoffice namespace label (00-namespace.yaml).
+#
+# CORS: Handled by Django middleware.
+# TLS: Cloudflare Flexible mode (edge termination, origin HTTP).
+#
+# Replaces: k8s/30-ingress.yaml (nginx)
+# Obsoletes: k8s/99-chatflow-ingress.yaml (cross-ns nginx hack)
+---
+# Frontend Route -- xoffice.cloud
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: frontend-route
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+spec:
+  parentRefs:
+    - name: platform-gateway
+      namespace: gateway
+      sectionName: xoffice-frontend
+  hostnames:
+    - xoffice.cloud
+  rules:
+    # WebSocket connections get unlimited timeout
+    - matches:
+        - headers:
+            - name: Upgrade
+              value: websocket
+      backendRefs:
+        - name: xoffice-frontend-service
+          port: 80
+      timeouts:
+        request: "0s"
+        backendRequest: "0s"
+    # Regular HTTP requests
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: xoffice-frontend-service
+          port: 80
+      timeouts:
+        request: 30s
+        backendRequest: 30s
+---
+# Backend API Route -- api.xoffice.cloud
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-route
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+spec:
+  parentRefs:
+    - name: platform-gateway
+      namespace: gateway
+      sectionName: xoffice-api
+  hostnames:
+    - api.xoffice.cloud
+  rules:
+    # WebSocket connections get unlimited timeout
+    - matches:
+        - headers:
+            - name: Upgrade
+              value: websocket
+      backendRefs:
+        - name: xoffice-backend-service
+          port: 80
+      timeouts:
+        request: "0s"
+        backendRequest: "0s"
+    # Regular API requests
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: xoffice-backend-service
+          port: 80
+      timeouts:
+        request: 30s
+        backendRequest: 30s
