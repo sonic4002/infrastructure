@@ -1,0 +1,115 @@
+---
+################################################################################
+# ChatFlow Web — Next.js public site (chatflowpro.live)
+#
+# Phase 1 deliverable: serves the OTP -> QR -> chat flow described in
+# ROADMAP.md "Phase 1 thinnest vertical slice".
+################################################################################
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chatflow-web
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow-web
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: chatflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chatflow-web
+      app.kubernetes.io/component: frontend
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chatflow-web
+        app.kubernetes.io/component: frontend
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: web
+          image: docker.io/sonic4002/digital_solutions:chatflow-web-latest    # TODO: build + pin to digest
+          imagePullPolicy: Always
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            # Next.js standalone listens on 3000 by default; image is built
+            # from chatflow/apps/web/Dockerfile (node:20-alpine).
+            - { name: http, containerPort: 3000, protocol: TCP }
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3000"
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            - name: NEXT_PUBLIC_API_URL
+              value: "https://api.chatflowpro.live"
+            - name: NEXT_PUBLIC_MQTT_URL
+              value: "wss://mqtt.chatflowpro.live/mqtt"
+            - name: NEXT_PUBLIC_DEFAULT_COUNTRY
+              value: "IL"
+            # Phase 1 shared MQTT creds (the broker uses built-in DB password
+            # auth; per-user JWT + ACL is Phase 2). The NEXT_PUBLIC_ prefix
+            # bakes these into the JS bundle — fine here because content is
+            # AES-GCM encrypted with K_p2c at the application layer; the
+            # broker only sees ciphertext regardless of who connects.
+            - name: NEXT_PUBLIC_MQTT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: chatflow-mqtt-credentials
+                  key: CLIENT_USERNAME
+            - name: NEXT_PUBLIC_MQTT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chatflow-mqtt-credentials
+                  key: CLIENT_PASSWORD
+          resources:
+            requests: { cpu: 50m,  memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 3000 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /healthz, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 64Mi }
+      imagePullSecrets:
+        - name: dockerhub-secret
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chatflow-web-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow-web
+    app.kubernetes.io/component: frontend
+    app.kubernetes.io/part-of: chatflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: chatflow-web
+    app.kubernetes.io/component: frontend
+  ports:
+    - { name: http, port: 80, targetPort: 3000, protocol: TCP }

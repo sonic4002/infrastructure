@@ -1,0 +1,123 @@
+---
+################################################################################
+# Gateway — public HTTP API surface
+#
+# Public endpoints (via api.chatflowpro.live HTTPRoute -> /v1/* + /health):
+#   POST /v1/sessions                 (create / list / terminate WA sessions)
+#   POST /v1/devices/*                (pair / unpair)
+#   POST /v1/commands/send            (encrypted command body to WA pod)
+#   POST /v1/commands/mark-read
+#   POST /v1/scheduled/*              (Phase 2)
+#   POST /v1/push/register            (Phase 2)
+#   GET  /health, /ready
+#
+# Validates JWTs against Auth Service JWKS, routes to wa-pod ClusterIP based
+# on user_id extracted from the JWT, returns ack to client.
+################################################################################
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gateway
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: chatflow
+automountServiceAccountToken: false
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: chatflow
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chatflow
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chatflow
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      serviceAccountName: gateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: docker.io/sonic4002/digital_solutions:chatflow-gateway-latest    # TODO: build + pin to digest
+          imagePullPolicy: Always
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          env:
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: AUTH_JWKS_URL
+              value: "http://auth-service.chatflow.svc.cluster.local:8080/.well-known/jwks.json"
+            - name: ORCHESTRATOR_URL
+              value: "http://orchestrator-service.chatflow.svc.cluster.local:8080"
+            - name: OPENBAO_URL
+              value: "http://openbao-service.chatflow.svc.cluster.local:8200"
+            - name: WA_POD_BASE_DOMAIN
+              value: "chatflow.svc.cluster.local"
+              # Gateway constructs http://chatflow-pod-{user_id}.chatflow.svc...
+            - name: JWT_AUDIENCE
+              value: "chatflow-gateway"
+            - name: RATE_LIMIT_PER_USER_PER_SEC
+              value: "10"
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /ready, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: chatflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: gateway
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }

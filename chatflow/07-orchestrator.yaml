@@ -1,0 +1,243 @@
+---
+################################################################################
+# Orchestrator — pod lifecycle management
+#
+# Responsibilities:
+#   - Provision per-user K8s resources (ServiceAccount, RoleBinding,
+#     ClusterIP Service, Pod) using the template documented in
+#     09-wa-pod-template.yaml.
+#   - Maintain the orchestrator-side OpenBao bookkeeping:
+#       * create per-user Transit key chatflow-{user_id}
+#       * create per-user PKI role binding
+#       * write k8s-auth role for chatflow-pod-{user_id} ServiceAccount
+#         with audience=openbao
+#   - Run quotas, idle reaper (Phase 4), session state transitions.
+#
+# Image is TODO — Phase 1 deliverable.
+################################################################################
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orchestrator
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: chatflow
+automountServiceAccountToken: true
+
+---
+# ---------------------------------------------------------------------------
+# Namespace-scoped Role: dynamically manage WA pods + supporting resources.
+# Scope is tight: only the resource kinds the orchestrator owns.
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: orchestrator
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: chatflow
+rules:
+  # WA pods (created/deleted per user)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/status", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Per-user ServiceAccounts
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Per-user ClusterIP Services (so the gateway can reach the pod by user_id)
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Per-user RoleBindings (bind chatflow-pod-{user_id} SA to a wa-pod Role)
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Read the wa-pod base Role (owned cluster-wide / namespace-wide)
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["get", "list", "watch"]
+  # Read postgres / openbao secrets to wire pod env (not the pod's own SA token)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames: ["postgres-secret"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: orchestrator
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: chatflow
+subjects:
+  - kind: ServiceAccount
+    name: orchestrator
+    namespace: chatflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: orchestrator
+
+---
+# ---------------------------------------------------------------------------
+# Reusable wa-pod Role — every chatflow-pod-{user_id} SA gets bound to this.
+# Kept minimal: pods don't need to read the K8s API beyond their own status.
+# ---------------------------------------------------------------------------
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chatflow-wa-pod-base
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: wa-client
+    app.kubernetes.io/part-of: chatflow
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+    resourceNames: []   # orchestrator narrows this to the pod's own name at create time
+
+---
+# ---------------------------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: chatflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chatflow
+      app.kubernetes.io/component: orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chatflow
+        app.kubernetes.io/component: orchestrator
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      serviceAccountName: orchestrator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orchestrator
+          image: docker.io/sonic4002/digital_solutions:chatflow-orchestrator-latest    # TODO: build + pin to digest
+          imagePullPolicy: Always
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          env:
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: DB_HOST
+              value: "postgres-service.chatflow.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: ORCHESTRATOR_DB_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: ORCHESTRATOR_DB_PASSWORD } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: ORCHESTRATOR_DB_NAME } }
+            - name: OPENBAO_ADDR
+              value: "http://openbao-service.chatflow.svc.cluster.local:8200"
+            - name: OPENBAO_K8S_ROLE
+              value: "orchestrator"
+            - name: AUTH_JWKS_URL
+              value: "http://auth-service.chatflow.svc.cluster.local:8080/.well-known/jwks.json"
+            - name: AUTH_SERVICE_URL
+              value: "http://auth-service.chatflow.svc.cluster.local:8080"
+            # Phase 2: passed through to wa-pods as AUTH_INTERNAL_URL so
+            # they can call /internal/pod-jwt with their projected SA
+            # token (audience chatflow-auth-internal). Wa-pod's mqtt.New
+            # hard-fails when this is unset.
+            - name: AUTH_INTERNAL_URL
+              value: "http://auth-service.chatflow.svc.cluster.local:8080"
+            - name: WA_POD_IMAGE
+              value: "docker.io/sonic4002/digital_solutions:chatflow-wa-pod-latest"   # TODO build + pin
+            - name: WA_POD_TEMPLATE_VERSION
+              # TODO(deploy-chatflow skill): inject git SHA + build timestamp at
+              # deploy time so each release recycles all running wa-pods.
+              # Until the skill is updated, this is left as a placeholder; the
+              # orchestrator falls back to "unset-<startup-unix>", which means
+              # every orchestrator restart triggers a one-shot recycle wave
+              # (loud in logs, fine for Phase 1 with one user).
+              value: "wapod-b5d92a9-1778102172"
+            - name: WA_POD_BASE_ROLE
+              value: "chatflow-wa-pod-base"
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits:   { cpu: 500m, memory: 512Mi }
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /ready, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: openbao-token, mountPath: /var/run/secrets/openbao, readOnly: true }
+            - { name: tmp,           mountPath: /tmp }
+      volumes:
+        - name: openbao-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+                  audience: openbao
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orchestrator-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: chatflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: orchestrator
+  ports:
+    - { name: http, port: 8080, targetPort: 8080, protocol: TCP }

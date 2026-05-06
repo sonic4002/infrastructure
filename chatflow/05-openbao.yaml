@@ -1,0 +1,495 @@
+---
+################################################################################
+# OpenBao — PKI + Transit + K8s auth
+#
+# Phase 1: single-node Raft. Production HA (3 nodes + auto-unseal) is a
+# Phase 4 deliverable; for Phase 1 we accept the operational cost of
+# manual unseal after every pod restart UNLESS auto-unseal is configured.
+#
+# WARNING (Phase 1 limitation):
+#   Without auto-unseal, every restart of the openbao-0 pod requires running
+#   `openbao operator unseal` THREE times with three of the unseal-key shares.
+#   The init Job stores those shares in a Secret as a stop-gap; you MUST also
+#   record them OUT OF BAND (e.g. printed receipt in a fire safe) because
+#   losing them is unrecoverable for a single-node Raft cluster.
+#
+# Init Job is idempotent:
+#   - Polls `vault status`. Only `init` if Initialized=false.
+#   - Only enables transit / pki / kubernetes-auth if not already enabled.
+#   - Writes openbao-root-token + openbao-unseal-keys secrets only on the
+#     init pass; subsequent runs no-op.
+################################################################################
+
+---
+# ---------------------------------------------------------------------------
+# ServiceAccount for OpenBao itself (used by k8s auth method to TokenReview)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+    app.kubernetes.io/part-of: chatflow
+
+---
+# ClusterRoleBinding so OpenBao can call TokenReview API for k8s auth method.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: chatflow-openbao-tokenreview
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+    app.kubernetes.io/part-of: chatflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: openbao
+    namespace: chatflow
+
+---
+# ---------------------------------------------------------------------------
+# ConfigMap — openbao server config (Raft single-node)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-config
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+    app.kubernetes.io/part-of: chatflow
+data:
+  config.hcl: |
+    ui = true
+    disable_mlock = true
+
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = 1   # In-cluster only; Cilium policy gates ingress.
+    }
+
+    storage "raft" {
+      path    = "/openbao/data"
+      node_id = "openbao-0"
+    }
+
+    api_addr     = "http://openbao-0.openbao-headless.chatflow.svc.cluster.local:8200"
+    cluster_addr = "http://openbao-0.openbao-headless.chatflow.svc.cluster.local:8201"
+
+    # No seal stanza = Shamir unseal. For Phase 4, switch to a transit/awskms/gcpkms seal.
+
+---
+# ---------------------------------------------------------------------------
+# StatefulSet
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: openbao
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+    app.kubernetes.io/part-of: chatflow
+spec:
+  serviceName: openbao-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: openbao
+      app.kubernetes.io/component: secrets
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao
+        app.kubernetes.io/component: secrets
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      serviceAccountName: openbao
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: openbao
+          image: openbao/openbao:2.0.0
+          imagePullPolicy: IfNotPresent
+          command: ["bao", "server", "-config=/etc/openbao/config.hcl"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              # IPC_LOCK would let openbao mlock memory — disabled (disable_mlock=true above)
+              drop: ["ALL"]
+          ports:
+            - { name: api,     containerPort: 8200, protocol: TCP }
+            - { name: cluster, containerPort: 8201, protocol: TCP }
+          env:
+            - name: BAO_API_ADDR
+              value: "http://$(POD_IP):8200"
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200
+              port: 8200
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /v1/sys/health?standbyok=true
+              port: 8200
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - { name: openbao-data, mountPath: /openbao/data }
+            - { name: openbao-config, mountPath: /etc/openbao, readOnly: true }
+      volumes:
+        - name: openbao-config
+          configMap:
+            name: openbao-config
+  volumeClaimTemplates:
+    - metadata:
+        name: openbao-data
+        labels:
+          app.kubernetes.io/name: openbao
+          app.kubernetes.io/component: secrets
+          app.kubernetes.io/part-of: chatflow
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+# ---------------------------------------------------------------------------
+# Headless Service — Raft cluster DNS
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao-headless
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+    app.kubernetes.io/part-of: chatflow
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true   # init Job needs to reach pre-unseal pod
+  selector:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+  ports:
+    - { name: api,     port: 8200, targetPort: 8200 }
+    - { name: cluster, port: 8201, targetPort: 8201 }
+
+---
+# ---------------------------------------------------------------------------
+# ClusterIP Service — clients (auth, orchestrator, wa-pods, init Job)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+    app.kubernetes.io/part-of: chatflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets
+  ports:
+    - { name: api, port: 8200, targetPort: 8200 }
+
+---
+# ---------------------------------------------------------------------------
+# ServiceAccount + RBAC for the init Job
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openbao-init
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets-init
+    app.kubernetes.io/part-of: chatflow
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openbao-init
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets-init
+    app.kubernetes.io/part-of: chatflow
+rules:
+  # Job creates/reads the openbao-root-token + openbao-unseal-keys secrets.
+  # `create` cannot be scoped by resourceName (the resource doesn't exist yet);
+  # `get/update/patch` are scoped to just the two secrets we own.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "update", "patch"]
+    resourceNames: ["openbao-root-token", "openbao-unseal-keys"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: openbao-init
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets-init
+    app.kubernetes.io/part-of: chatflow
+subjects:
+  - kind: ServiceAccount
+    name: openbao-init
+    namespace: chatflow
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: openbao-init
+
+---
+# ---------------------------------------------------------------------------
+# ConfigMap — idempotent init script
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: openbao-init-script
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets-init
+    app.kubernetes.io/part-of: chatflow
+data:
+  init.sh: |
+    #!/usr/bin/env sh
+    # Idempotent OpenBao bootstrapper.
+    #
+    # Talks to OpenBao via its HTTP API (no `bao` CLI required) and uses
+    # `kubectl` (provided by the alpine/k8s image) to write the resulting
+    # root token + unseal keys back into Kubernetes secrets.
+    #
+    # Re-running this script after a successful run is a no-op:
+    #   - vault status is checked first
+    #   - secrets engines and auth methods are listed before being enabled
+    #   - PKI root is generated only if pki/cert/ca returns 404
+    set -eu
+
+    # NOTE: use headless service so we can reach openbao-0 BEFORE the regular
+    # ClusterIP service includes it as a ready endpoint. The pod readiness
+    # gate is "sealed=false", which only happens AFTER this init script
+    # initializes + unseals it. Chicken/egg, hence headless.
+    BAO_ADDR="${BAO_ADDR:-http://openbao-headless.chatflow.svc.cluster.local:8200}"
+    NS="chatflow"
+
+    api() {
+      method=$1; path=$2; data=${3:-}
+      if [ -n "${data}" ]; then
+        curl -sS -X "${method}" -H "X-Vault-Token: ${BAO_TOKEN:-}" \
+          -H 'Content-Type: application/json' \
+          -d "${data}" "${BAO_ADDR}${path}"
+      else
+        curl -sS -X "${method}" -H "X-Vault-Token: ${BAO_TOKEN:-}" \
+          "${BAO_ADDR}${path}"
+      fi
+    }
+
+    echo "[init] waiting for openbao API..."
+    for i in $(seq 1 60); do
+      code=$(curl -s -o /dev/null -w '%{http_code}' \
+        "${BAO_ADDR}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200" || echo "000")
+      [ "${code}" = "200" ] && break
+      sleep 2
+    done
+
+    STATUS=$(curl -sS "${BAO_ADDR}/v1/sys/health?standbyok=true&sealedcode=200&uninitcode=200" || echo '{}')
+    INITIALIZED=$(echo "${STATUS}" | jq -r '.initialized')
+
+    if [ "${INITIALIZED}" != "true" ]; then
+      echo "[init] running operator init (key-shares=5, threshold=3)"
+      INIT_OUT=$(curl -sS -X POST -H 'Content-Type: application/json' \
+        -d '{"secret_shares":5,"secret_threshold":3}' \
+        "${BAO_ADDR}/v1/sys/init")
+      ROOT_TOKEN=$(echo "${INIT_OUT}" | jq -r '.root_token')
+      UNSEAL_JSON=$(echo "${INIT_OUT}" | jq -c '.keys_base64')
+
+      kubectl -n "${NS}" create secret generic openbao-root-token \
+        --from-literal=token="${ROOT_TOKEN}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+      kubectl -n "${NS}" create secret generic openbao-unseal-keys \
+        --from-literal=keys="${UNSEAL_JSON}" \
+        --dry-run=client -o yaml | kubectl apply -f -
+
+      echo "[init] auto-unsealing using freshly generated keys"
+      i=0
+      for k in $(echo "${UNSEAL_JSON}" | jq -r '.[]'); do
+        curl -sS -X POST -H 'Content-Type: application/json' \
+          -d "$(jq -nc --arg key "${k}" '{key:$key}')" \
+          "${BAO_ADDR}/v1/sys/unseal" >/dev/null
+        i=$((i+1))
+        [ "${i}" -ge 3 ] && break
+      done
+    else
+      echo "[init] openbao already initialized"
+    fi
+
+    SEAL=$(curl -sS "${BAO_ADDR}/v1/sys/seal-status" | jq -r '.sealed')
+    if [ "${SEAL}" = "true" ]; then
+      echo "[init] WARNING: openbao is sealed; init Job will not auto-unseal"
+      echo "[init] an already-initialized cluster (Phase 4 auto-unseal not"
+      echo "[init] configured). Operator must run, from a host with kubectl:"
+      echo "[init]   KEYS=\$(kubectl -n chatflow get secret openbao-unseal-keys -o jsonpath='{.data.keys}' | base64 -d)"
+      echo "[init]   for k in \$(echo \"\$KEYS\" | jq -r '.[]' | head -n3); do"
+      echo "[init]     curl -sX POST -d \"{\\\"key\\\":\\\"\$k\\\"}\" ${BAO_ADDR}/v1/sys/unseal"
+      echo "[init]   done"
+      exit 1
+    fi
+
+    BAO_TOKEN=$(kubectl -n "${NS}" get secret openbao-root-token \
+      -o jsonpath='{.data.token}' | base64 -d)
+    export BAO_TOKEN
+
+    echo "[init] enabling secrets engines (idempotent)"
+    MOUNTS=$(api GET /v1/sys/mounts)
+    echo "${MOUNTS}" | jq -e '.["transit/"]' >/dev/null 2>&1 || \
+      api POST /v1/sys/mounts/transit '{"type":"transit"}' >/dev/null
+    echo "${MOUNTS}" | jq -e '.["pki/"]' >/dev/null 2>&1 || \
+      api POST /v1/sys/mounts/pki '{"type":"pki","config":{"max_lease_ttl":"87600h"}}' >/dev/null
+
+    # Root CA: generate only if /pki/cert/ca returns no certificate.
+    CERT=$(api GET /v1/pki/cert/ca | jq -r '.data.certificate // ""')
+    if [ -z "${CERT}" ]; then
+      echo "[init] generating PKI root CA"
+      api POST /v1/pki/root/generate/internal \
+        '{"common_name":"ChatFlow Root CA","ttl":"87600h"}' >/dev/null
+      api POST /v1/pki/config/urls \
+        '{"issuing_certificates":"http://openbao-service.chatflow.svc.cluster.local:8200/v1/pki/ca","crl_distribution_points":"http://openbao-service.chatflow.svc.cluster.local:8200/v1/pki/crl"}' >/dev/null
+      api POST /v1/pki/roles/chatflow-pod \
+        '{"allowed_domains":"chatflow.svc","allow_subdomains":true,"max_ttl":"4h"}' >/dev/null
+    fi
+
+    echo "[init] enabling kubernetes auth (idempotent)"
+    AUTHS=$(api GET /v1/sys/auth)
+    echo "${AUTHS}" | jq -e '.["kubernetes/"]' >/dev/null 2>&1 || \
+      api POST /v1/sys/auth/kubernetes '{"type":"kubernetes"}' >/dev/null
+
+    # NOTE: do NOT pass token_reviewer_jwt. The openbao SA already has
+    # system:auth-delegator (see ClusterRoleBinding chatflow-openbao-tokenreview)
+    # and OpenBao will use its own pod SA token for TokenReview API calls.
+    # Passing the init Job's SA token as reviewer would fail because the init
+    # SA has no TokenReview permission.
+    K8S_CA=$(cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt)
+    K8S_CONFIG=$(jq -nc \
+      --arg host  "https://kubernetes.default.svc" \
+      --arg ca    "${K8S_CA}" \
+      '{kubernetes_host:$host, kubernetes_ca_cert:$ca, audiences:"openbao"}')
+    api POST /v1/auth/kubernetes/config "${K8S_CONFIG}" >/dev/null
+
+    echo "[init] writing orchestrator policy + role"
+    api POST /v1/sys/policies/acl/orchestrator '{"policy":"path \"transit/keys/*\" { capabilities = [\"create\", \"read\", \"update\", \"delete\", \"list\"] }\npath \"transit/encrypt/chatflow-*\" { capabilities = [\"update\"] }\npath \"transit/decrypt/chatflow-*\" { capabilities = [\"update\"] }\npath \"sys/policies/acl/chatflow-pod-*\" { capabilities = [\"create\", \"read\", \"update\", \"delete\"] }\npath \"auth/kubernetes/role/chatflow-pod-*\" { capabilities = [\"create\", \"read\", \"update\", \"delete\"] }\npath \"pki/issue/chatflow-pod\" { capabilities = [\"update\"] }\npath \"pki/cert/ca\" { capabilities = [\"read\"] }"}' >/dev/null
+    api POST /v1/auth/kubernetes/role/orchestrator '{"bound_service_account_names":"orchestrator","bound_service_account_namespaces":"chatflow","policies":"orchestrator","ttl":"1h"}' >/dev/null
+
+    echo "[init] complete"
+
+---
+# ---------------------------------------------------------------------------
+# Init Job (idempotent)
+# ---------------------------------------------------------------------------
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: openbao-init
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: openbao
+    app.kubernetes.io/component: secrets-init
+    app.kubernetes.io/part-of: chatflow
+spec:
+  backoffLimit: 6
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: openbao
+        app.kubernetes.io/component: secrets-init
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      serviceAccountName: openbao-init
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: init
+          # alpine/k8s bundles kubectl, curl, jq, sh — exactly what init.sh
+          # needs. We talk to OpenBao via its HTTP API rather than pulling
+          # in the `bao` CLI.
+          image: alpine/k8s:1.30.5
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "/scripts/init.sh"]
+          env:
+            - name: BAO_ADDR
+              # Headless service so we can reach openbao-0 even when it's
+              # not "ready" (it isn't until we initialize+unseal it here).
+              value: "http://openbao-headless.chatflow.svc.cluster.local:8200"
+            # kubectl writes a discovery cache under $HOME/.kube; with
+            # readOnlyRootFilesystem the only writable path is /tmp.
+            - name: HOME
+              value: /tmp
+            - name: KUBECACHEDIR
+              value: /tmp/.kube/cache
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: tmp,     mountPath: /tmp }
+          resources:
+            requests: { cpu: 50m,  memory: 64Mi }
+            limits:   { cpu: 200m, memory: 256Mi }
+      volumes:
+        - name: scripts
+          configMap:
+            name: openbao-init-script
+            defaultMode: 0o555
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi

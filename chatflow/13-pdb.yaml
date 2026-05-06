@@ -1,0 +1,60 @@
+---
+################################################################################
+# PodDisruptionBudgets — keep at least one replica of each control-plane
+# service available across voluntary disruptions (node drains, upgrades).
+#
+# wa-pods are deliberately NOT covered: they're per-user singletons and the
+# autonomous-restart contract (ARCHITECTURE.md "Autonomous restart") covers
+# restoration without operator intervention.
+################################################################################
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: auth-service-pdb
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: auth
+    app.kubernetes.io/part-of: chatflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chatflow
+      app.kubernetes.io/component: auth
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orchestrator-pdb
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: orchestrator
+    app.kubernetes.io/part-of: chatflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chatflow
+      app.kubernetes.io/component: orchestrator
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: gateway-pdb
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: chatflow
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: chatflow
+      app.kubernetes.io/component: gateway

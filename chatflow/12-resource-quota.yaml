@@ -1,0 +1,40 @@
+---
+################################################################################
+# ResourceQuota — bounds the chatflow namespace
+#
+# Sizing assumes Phase 1 baseline + headroom for several wa-pods:
+#   - Static services (auth, orchestrator, gateway, web, postgres, emqx,
+#     openbao) ≈ 7 pods
+#   - WA pods request 100m / 256Mi each, limits 1500m / 1.5Gi
+#     (sized for WhatsApp's initial history sync — earlier 256Mi OOMed)
+#
+# Quota math:
+#   limits.cpu = 16      => 7 statics (~6 cpu) + ~6 wa-pods at full burst
+#                          OR 7 statics + 30 wa-pods at request-level
+#   limits.memory = 32Gi => 7 statics (~6 Gi) + ~17 wa-pods at limit
+#
+# Tuning hint: if you regularly see "exceeded quota" raise the matching cap.
+################################################################################
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: chatflow-resource-quota
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/part-of: chatflow
+    app.kubernetes.io/managed-by: kubectl
+spec:
+  hard:
+    pods: "50"
+    requests.cpu: "8"
+    limits.cpu: "16"
+    requests.memory: "16Gi"
+    limits.memory: "32Gi"
+    requests.storage: "32Gi"
+    persistentvolumeclaims: "10"
+    services: "60"                # one ClusterIP per wa-pod + statics
+    services.loadbalancers: "2"   # emqx-external (+ headroom)
+    services.nodeports: "1"
+    configmaps: "30"
+    secrets: "30"

@@ -1,0 +1,209 @@
+---
+################################################################################
+# PostgreSQL — multi-database backing store for ChatFlow services
+#
+# Three logical DBs, one user per DB (for Cilium-friendly auditing + future
+# row-level isolation):
+#
+#   chatflow_auth         -- owned by `auth`         (used by auth-service)
+#   chatflow_orchestrator -- owned by `orchestrator` (used by orchestrator)
+#   chatflow_sessions     -- owned by `wa_pod`       (used by WA pods + orch)
+#
+# Init script runs ONLY on first start (empty PGDATA). To re-init you must
+# delete the underlying PVC (postgres-storage-postgres-0). See README.
+################################################################################
+
+---
+# ---------------------------------------------------------------------------
+# init.sql — multi-database bootstrap
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: chatflow
+data:
+  10-init.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Each user is created with the password from postgres-secret. Privileges
+    # are scoped to that user's own database; the orchestrator additionally
+    # gets read-only on chatflow_sessions for inspection (no write).
+    psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "postgres" <<-SQL
+      CREATE USER ${AUTH_DB_USER}        WITH ENCRYPTED PASSWORD '${AUTH_DB_PASSWORD}';
+      CREATE USER ${ORCHESTRATOR_DB_USER} WITH ENCRYPTED PASSWORD '${ORCHESTRATOR_DB_PASSWORD}';
+      CREATE USER ${SESSIONS_DB_USER}    WITH ENCRYPTED PASSWORD '${SESSIONS_DB_PASSWORD}';
+
+      CREATE DATABASE ${AUTH_DB_NAME}        OWNER ${AUTH_DB_USER};
+      CREATE DATABASE ${ORCHESTRATOR_DB_NAME} OWNER ${ORCHESTRATOR_DB_USER};
+      CREATE DATABASE ${SESSIONS_DB_NAME}    OWNER ${SESSIONS_DB_USER};
+
+      REVOKE ALL ON DATABASE ${AUTH_DB_NAME}        FROM PUBLIC;
+      REVOKE ALL ON DATABASE ${ORCHESTRATOR_DB_NAME} FROM PUBLIC;
+      REVOKE ALL ON DATABASE ${SESSIONS_DB_NAME}    FROM PUBLIC;
+
+      -- Orchestrator gets read-only on chatflow_sessions for ops/inspection.
+      GRANT CONNECT ON DATABASE ${SESSIONS_DB_NAME} TO ${ORCHESTRATOR_DB_USER};
+    SQL
+
+    # Tighten default-privileges inside chatflow_sessions so when wa-pod
+    # creates tables, orchestrator gets SELECT but nothing more.
+    psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${SESSIONS_DB_NAME}" <<-SQL
+      ALTER DEFAULT PRIVILEGES FOR ROLE ${SESSIONS_DB_USER} IN SCHEMA public
+        GRANT SELECT ON TABLES TO ${ORCHESTRATOR_DB_USER};
+    SQL
+
+---
+# ---------------------------------------------------------------------------
+# StatefulSet
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: chatflow
+    app.kubernetes.io/version: "16"
+spec:
+  serviceName: postgres-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/component: database
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          volumeMounts:
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-U", "$(POSTGRES_USER)", "-d", "$(POSTGRES_DB)"]
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+      volumes:
+        - name: init-script
+          configMap:
+            name: postgres-init
+            defaultMode: 0o555
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-storage
+        labels:
+          app.kubernetes.io/name: postgres
+          app.kubernetes.io/component: database
+          app.kubernetes.io/part-of: chatflow
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+# ---------------------------------------------------------------------------
+# Headless Service (StatefulSet stable DNS)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-headless
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: chatflow
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# ClusterIP Service (the one services connect to)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: chatflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: database
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

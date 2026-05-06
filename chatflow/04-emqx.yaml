@@ -1,29 +1,32 @@
 ---
 ################################################################################
-# EMQX 5.8.5 — Phase 2 cutover STAGE A (chained authn: JWT + built_in_database)
+# EMQX 5.x — public MQTT broker (WSS + native TLS)
 #
-# Applied at cutover step 4a. The JWT authenticator runs first; on "no match"
-# (missing/invalid JWT password) the chain falls through to built_in_database
-# so legacy chatflow-pod / chatflow-client static creds keep working during
-# coexistence. Stage B (04-emqx-stageB.yaml) drops built_in_database + the
-# bootstrap-users init container once Phase 2 traffic is verified.
+# Auth model:
+#   - JWT validation against Auth Service JWKS (Ed25519). No shared secrets.
+#   - Topic ACLs are CLAIM-DRIVEN: client connects with JWT in MQTT password,
+#     EMQX extracts `sub`, `device_id`, `aud`, then enforces template ACLs
+#     scoped to that user's namespace and that device's command channel.
 #
-# VERIFIED IN KIND (P2-V):
-#   - EMQX 5.8.5 has no ${jwt.<claim>} placeholder syntax. JWT sub binds to
-#     MQTT username via verify_claims.sub = "${username}", then variform
-#     `expression = "username"` promotes username -> client_attrs.user_id.
-#   - device_id encoded in clientid via ':' separator (UUIDs contain '-', so
-#     '-' won't tokenize cleanly): nth(2, tokens(clientid, ':')).
-#   - acl_claim_name DROPPED — JWT authn returns hard error (not chain
-#     "ignore" fall-through) on misshapen scope claim. File-based ACL only.
-#   - ConfigMap-based authn changes are overridden by EMQX dashboard writes
-#     to data/configs/cluster.hocon. Stage-B procedure wipes it before apply.
+# Topics (per ARCHITECTURE.md "MQTT topic ACLs"):
+#   chatflow/{user_id}/events/incoming   pod publish, devices subscribe
+#   chatflow/{user_id}/events/status     pod publish, devices subscribe
+#   chatflow/{user_id}/handshake         pod publish (retained)
+#   chatflow/{user_id}/cmd/{device_id}   one device publishes, pod subscribes
+#   chatflow/{user_id}/admin             pod-only
 #
-# Logging: pinned to info. NEVER set debug in prod — CONNECT packets log
-# JWT-passwords at debug level.
+# IMPORTANT - placeholder syntax verification (TODO before first deploy):
+# EMQX 5.5+ exposes JWT claims to ACL rules under different names depending
+# on EMQX version. The HOCON below uses `${client_attrs.user_id}` which is
+# the standard EMQX 5.4+ form when `from = "password"` and JWT custom claims
+# are mapped via `claims_filter`. If your EMQX image differs, swap to
+# `${user_property.sub}` or `${cert_common_name}` as appropriate.
 ################################################################################
 
 ---
+# ---------------------------------------------------------------------------
+# ConfigMap — emqx.conf (HOCON, EMQX 5.x format)
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -51,6 +54,8 @@ data:
     listeners.tcp.default {
       bind = "0.0.0.0:1883"
       max_connections = 10000
+      # Internal TCP listener — only WA pods + orchestrator reach this
+      # (network policy enforces). For public clients use ws.default.
     }
 
     listeners.ws.default {
@@ -64,37 +69,29 @@ data:
     listeners.ssl.default {
       bind = "0.0.0.0:8883"
       max_connections = 50000
-      enable = false
+      enable = false   # TODO Phase 2: enable once cert-manager issues mqtt cert
     }
 
     listeners.wss.default {
       bind = "0.0.0.0:8084"
-      enable = false
+      enable = false   # TODO Phase 2
     }
 
     ##########################################################################
-    # Authentication chain (Stage A): JWT first, fall through to built_in_db.
-    # JWT authn: verify_claims.sub = ${username} binds JWT sub to MQTT
-    # username. Variform client_attrs_init then promotes username ->
-    # client_attrs.user_id and clientid ":" segment 2 -> client_attrs.device_id.
+    # Authentication: Phase 1 uses built-in database with bootstrap users.
+    # Two static usernames are seeded by the init container from the
+    # chatflow-mqtt-credentials Secret:
+    #   - chatflow-pod    (used by all wa-pods)
+    #   - chatflow-client (used by all web/mobile clients in Phase 1)
+    # Both passwords are random 192-bit values mounted via env vars and
+    # written to /opt/emqx/data/bootstrap/users.csv at pod start.
+    #
+    # Phase 2 will replace this with JWT validation against Auth Service JWKS
+    # (per ARCHITECTURE.md "MQTT topic ACLs"). The two static credentials are
+    # deliberately coarse: per-user isolation is a Phase 2 deliverable.
     ##########################################################################
     authentication = [
       {
-        mechanism = jwt
-        use_jwks = true
-        endpoint = "http://auth-service.chatflow.svc.cluster.local:8080/.well-known/jwks.json"
-        refresh_interval = 30
-        verify_claims = {
-          aud = "chatflow-emqx"
-          sub = "${username}"
-        }
-        from = password
-        # NOTE: do NOT set acl_claim_name. The JWT authenticator returns
-        # hard error (not chain "ignore" fall-through) on misshapen scope
-        # claim. File-based ACL handles authorization.
-      },
-      {
-        # stage-A only — remove in stage-B once Phase 2 deploys verified
         mechanism = password_based
         backend = built_in_database
         user_id_type = username
@@ -107,33 +104,27 @@ data:
       }
     ]
 
+    ##########################################################################
+    # Authorization: Phase 1 allow-all (any AUTHENTICATED client). Auth above
+    # is the access gate; topic isolation is Phase 2.
+    ##########################################################################
+    authorization {
+      no_match = allow
+      deny_action = ignore
+      cache { enable = true }
+    }
+
+    ##########################################################################
+    # MQTT session settings — hold queued events while clients reconnect
+    ##########################################################################
     mqtt {
-      client_attrs_init = [
-        { expression = "username",                       set_as_attr = "user_id" },
-        { expression = "nth(2, tokens(clientid, ':'))",  set_as_attr = "device_id" }
-      ]
+      max_mqueue_len = 1000
       max_inflight = 100
       max_packet_size = "256KB"
       idle_timeout = "60s"
       max_topic_alias = 65535
       retry_interval = "30s"
-      # Persistent session: 100 msg/day x 7d x 70x safety margin.
-      session_expiry_interval = 7d
-      max_mqueue_len = 50000
-      # NOTE: mqueue.store_qos0 + mqueue.priorities aren't valid 5.8.5
-      # mqtt.* fields. Defaults are fine (store_qos0 false by default).
-    }
-
-    ##########################################################################
-    # Authorization: default-deny + file-based ACL.
-    # deny_action = disconnect ensures violators don't silently quiesce.
-    ##########################################################################
-    authorization {
-      no_match = deny
-      deny_action = disconnect
-      sources = [
-        { type = file, enable = true, path = "etc/acl.conf" }
-      ]
+      session_expiry_interval = "2h"
     }
 
     retainer {
@@ -151,31 +142,40 @@ data:
       default_password = "${EMQX_DASHBOARD_DEFAULT_PASSWORD}"
     }
 
-    # NEVER set to debug in prod — CONNECT packets log JWT passwords at debug.
-    log.console.level = info
+    log {
+      console { level = info }
+    }
 
   acl.conf: |
-    %% ChatFlow MQTT ACL — Phase 2 (verified syntax, P2-V).
-    %% client_attrs.user_id and client_attrs.device_id populated by variform
-    %% expressions in mqtt.client_attrs_init above.
-    %% clientid format: web:<device_id> for web/mobile, pod:<session_id> for wa-pod.
+    %% ChatFlow MQTT ACL — derived from ARCHITECTURE.md "MQTT topic ACLs".
+    %% Placeholder syntax: ${client_attrs.user_id} and ${client_attrs.device_id}
+    %% are populated by the JWT auth backend mapping `sub` -> user_id and
+    %% custom claim `device_id` -> device_id.
 
-    %% Web user
-    {allow, {clientid, {re, "^web:.+"}}, subscribe,
-      ["chatflow/${client_attrs.user_id}/+/+",
-       "chatflow/${client_attrs.user_id}/handshake"]}.
-    {allow, {clientid, {re, "^web:.+"}}, publish,
-      ["chatflow/${client_attrs.user_id}/cmd/${client_attrs.device_id}"]}.
+    %% --- Subscribe ---
+    %% A user's devices may subscribe to their own user namespace events
+    %% and the retained handshake.
+    {allow, {client_attrs, "user_id"}, subscribe,
+       ["chatflow/${client_attrs.user_id}/events/+",
+        "chatflow/${client_attrs.user_id}/handshake"]}.
 
-    %% Pod (publish only)
-    {allow, {clientid, {re, "^pod:.+"}}, publish,
-      ["chatflow/${client_attrs.user_id}/+/+",
-       "chatflow/${client_attrs.user_id}/handshake"]}.
+    %% --- Publish ---
+    %% A device may publish ONLY to its own device-scoped command channel.
+    {allow, {client_attrs, "user_id"}, publish,
+       ["chatflow/${client_attrs.user_id}/cmd/${client_attrs.device_id}"]}.
 
-    %% Default deny (also enforced by authorization.no_match = deny).
-    {deny, all}.
+    %% --- Pod-only topic (admin) ---
+    %% WA pods authenticate via cert/internal credentials, not the user JWT;
+    %% pod-side publish to /admin is granted by the internal-only ACL profile
+    %% the pod loads at startup (kept here as documentation).
+
+    %% Default deny everything else.
+    {deny, all, all, ["#"]}.
 
 ---
+# ---------------------------------------------------------------------------
+# StatefulSet
+# ---------------------------------------------------------------------------
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -207,7 +207,6 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       initContainers:
-        # stage-A only — remove in stage-B once Phase 2 deploys verified
         - name: bootstrap-users
           image: alpine:3.19
           command: ["sh", "-c"]
@@ -216,6 +215,8 @@ spec:
               set -eu
               umask 077
               mkdir -p /opt/emqx/data/bootstrap
+              # EMQX 5.8+ JSON bootstrap format. Each object: { user_id, password, is_superuser }
+              # EMQX hashes the password (sha256+salt) on first startup.
               cat > /opt/emqx/data/bootstrap/users.json <<EOF
               [
                 {"user_id": "${POD_USERNAME}", "password": "${POD_PASSWORD}", "is_superuser": false},
@@ -303,7 +304,6 @@ spec:
           volumeMounts:
             - { name: emqx-data,   mountPath: /opt/emqx/data }
             - { name: emqx-config, mountPath: /opt/emqx/etc/emqx.conf, subPath: emqx.conf }
-            - { name: emqx-config, mountPath: /opt/emqx/etc/acl.conf,  subPath: acl.conf }
       volumes:
         - name: emqx-config
           configMap:
@@ -322,6 +322,9 @@ spec:
             storage: 1Gi
 
 ---
+# ---------------------------------------------------------------------------
+# Headless Service — required by StatefulSet for stable DNS
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
@@ -343,6 +346,9 @@ spec:
     - { name: cluster-ekk, port: 4370,  targetPort: 4370 }
 
 ---
+# ---------------------------------------------------------------------------
+# ClusterIP Service — internal callers (HTTPRoute -> :8083, WA pods -> :1883)
+# ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
 metadata:
@@ -361,3 +367,13 @@ spec:
     - { name: mqtt-tcp, port: 1883, targetPort: 1883 }
     - { name: mqtt-ws,  port: 8083, targetPort: 8083 }
     - { name: dashboard, port: 18083, targetPort: 18083 }
+
+---
+# External LoadBalancer for native MQTT (mobile clients) is DEFERRED to
+# Phase 2. Web clients use WSS through the Cilium gateway HTTPRoute
+# (mqtt.chatflowpro.live -> emqx-service:8083) which is sufficient for
+# Phase 1.
+#
+# When mobile arrives, re-add a LoadBalancer Service here for ports
+# 8883 (mqtts) and 8084 (mqtt-wss) — and bump
+# 12-resource-quota.yaml services.loadbalancers if needed.

@@ -1,6 +1,17 @@
 ---
-# Namespace for WhatsApp Microservice Production Deployment
-# This namespace isolates all WhatsApp service resources in the cluster
+################################################################################
+# Namespace: chatflow
+#
+# Hosts the rebuilt ChatFlow stack (Phase 1 baseline):
+#   - auth-service, orchestrator, gateway (control + data plane)
+#   - emqx (public MQTT/WSS broker)
+#   - openbao (PKI + Transit, single-node Raft for Phase 1)
+#   - postgres (multi-DB: chatflow_auth / chatflow_orchestrator / chatflow_sessions)
+#   - chatflow-web (Next.js public site)
+#   - dynamically-provisioned wa-pods (one per user, NOT in this manifest set)
+#
+# Cilium-aware labels match what platform-gateway HTTPRoutes target.
+################################################################################
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -8,6 +19,9 @@ metadata:
   labels:
     name: chatflow
     environment: production
-    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/name: chatflow
     app.kubernetes.io/part-of: chatflow
     app.kubernetes.io/managed-by: kubectl
+    # Cilium gateway/HTTPRoute namespace selectors look for this label.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

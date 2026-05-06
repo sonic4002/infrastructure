@@ -1,0 +1,13 @@
+---
+# Namespace for WhatsApp Microservice Production Deployment
+# This namespace isolates all WhatsApp service resources in the cluster
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: chatflow
+  labels:
+    name: chatflow
+    environment: production
+    app.kubernetes.io/name: whatsapp-microservice
+    app.kubernetes.io/part-of: chatflow
+    app.kubernetes.io/managed-by: kubectl

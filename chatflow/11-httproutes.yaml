@@ -1,0 +1,148 @@
+---
+################################################################################
+# HTTPRoutes — chatflow namespace -> platform-gateway sections
+#
+# Domains (DNS already configured by the user):
+#   api.chatflowpro.live  -> platform-gateway/chatflow-api
+#   chatflowpro.live      -> platform-gateway/chatflow-web
+#   mqtt.chatflowpro.live -> platform-gateway/chatflow-mqtt
+#
+# Routing rationale (decision: keep /auth on api.* sub-path rather than
+# minting a new auth.chatflowpro.live host -> avoids new DNS + cert):
+#   api.chatflowpro.live/auth/*  -> auth-service
+#   api.chatflowpro.live/v1/*    -> gateway-service
+#   api.chatflowpro.live/health  -> gateway-service
+################################################################################
+
+---
+# ---------------------------------------------------------------------------
+# api.chatflowpro.live
+# ---------------------------------------------------------------------------
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-route
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: routing
+    app.kubernetes.io/part-of: chatflow
+spec:
+  parentRefs:
+    - name: platform-gateway
+      namespace: gateway
+      sectionName: chatflow-api
+  hostnames:
+    - "api.chatflowpro.live"
+  rules:
+    # ----- Auth Service ----------------------------------------------------
+    # Twilio SMS send can take 10–15s in practice. Headroom included.
+    - matches:
+        - path: { type: PathPrefix, value: /auth/ }
+      backendRefs:
+        - { name: auth-service, port: 8080 }
+      timeouts: { request: "30s" }
+
+    # JWKS published by Auth Service (validators are in-cluster but we expose
+    # the endpoint publicly for transparency / external tooling).
+    - matches:
+        - path: { type: Exact, value: /.well-known/jwks.json }
+      backendRefs:
+        - { name: auth-service, port: 8080 }
+      timeouts: { request: "5s" }
+
+    # ----- Health probes (gateway service exposes its own /health) --------
+    - matches:
+        - path: { type: Exact, value: /health }
+      backendRefs:
+        - { name: gateway-service, port: 8080 }
+
+    - matches:
+        - path: { type: Exact, value: /ready }
+      backendRefs:
+        - { name: gateway-service, port: 8080 }
+
+    # ----- Public API (gateway) -------------------------------------------
+    - matches:
+        - path: { type: PathPrefix, value: /v1/ }
+      backendRefs:
+        - { name: gateway-service, port: 8080 }
+      timeouts: { request: "30s" }
+
+    # Catch-all -> gateway (gives clean 404 with consistent error envelope)
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - { name: gateway-service, port: 8080 }
+      timeouts: { request: "30s" }
+
+---
+# ---------------------------------------------------------------------------
+# chatflowpro.live (apex)
+# ---------------------------------------------------------------------------
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: web-route
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: routing
+    app.kubernetes.io/part-of: chatflow
+spec:
+  parentRefs:
+    - name: platform-gateway
+      namespace: gateway
+      sectionName: chatflow-web
+  hostnames:
+    - "chatflowpro.live"
+  rules:
+    # Google Play account-deletion compliance endpoint -> gateway
+    - matches:
+        - path:   { type: Exact, value: /api/v1/account/delete-request }
+          method: POST
+      backendRefs:
+        - { name: gateway-service, port: 8080 }
+      timeouts: { request: "30s" }
+
+    # Web app health probe
+    - matches:
+        - path: { type: Exact, value: /healthz }
+      backendRefs:
+        - { name: chatflow-web-service, port: 80 }
+
+    # SPA catch-all
+    - matches:
+        - path: { type: PathPrefix, value: / }
+      backendRefs:
+        - { name: chatflow-web-service, port: 80 }
+      timeouts: { request: "30s" }
+
+---
+# ---------------------------------------------------------------------------
+# mqtt.chatflowpro.live (MQTT-over-WebSocket)
+# ---------------------------------------------------------------------------
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mqtt-route
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: routing
+    app.kubernetes.io/part-of: chatflow
+spec:
+  parentRefs:
+    - name: platform-gateway
+      namespace: gateway
+      sectionName: chatflow-mqtt
+  hostnames:
+    - "mqtt.chatflowpro.live"
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /mqtt }
+      backendRefs:
+        - { name: emqx-service, port: 8083 }
+      timeouts:
+        request: "0s"        # persistent WebSocket — no deadline
+        backendRequest: "0s"
