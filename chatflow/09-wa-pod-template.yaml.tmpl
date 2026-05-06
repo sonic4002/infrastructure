@@ -1,0 +1,215 @@
+---
+################################################################################
+# WA Client Pod TEMPLATE — DO NOT APPLY DIRECTLY
+#
+# This file is a documented reference for the orchestrator. The orchestrator
+# materialises one Pod, one ServiceAccount, one ClusterIP Service and one
+# RoleBinding per ChatFlow user using this template. Field substitution:
+#
+#   {USER_ID}    : the chatflow user UUID
+#   {SESSION_ID} : a per-pod-run session UUID (regenerated on every restart)
+#
+# Architecture invariants enforced here (re-read ARCHITECTURE.md before changing):
+#   - Pod is reachable ONLY by gateway + orchestrator (CiliumNetworkPolicy
+#     wa-pod-policy in 02-network-policies.yaml selects chatflow.io/role=wa-client)
+#   - readOnlyRootFilesystem + tmpfs only — NO PV, NO hostPath
+#   - Distroless base, runAsNonRoot, drop ALL caps, seccomp RuntimeDefault
+#   - Identity for OpenBao Transit/PKI is the SA token (audience=openbao),
+#     NOT the USER_ID env. The pod CANNOT decrypt another user's blob even
+#     if it forges a USER_ID env value.
+#   - tmpfs limited to 64Mi — emptyDir medium=Memory
+#
+# Selectors:
+#   - chatflow.io/role: wa-client      (REQUIRED — matches network policy)
+#   - chatflow.io/user-id: {USER_ID}   (used by gateway routing & orchestrator)
+#
+# The "kind: List" wrapper below is only to bundle the templated objects for
+# documentation. The orchestrator emits each object via the K8s API individually.
+################################################################################
+
+apiVersion: v1
+kind: List
+items:
+
+  # -------------------------------------------------------------------------
+  # ServiceAccount — chatflow-pod-{USER_ID}
+  # -------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: chatflow-pod-{USER_ID}
+      namespace: chatflow
+      labels:
+        app.kubernetes.io/name: chatflow
+        app.kubernetes.io/component: wa-client
+        app.kubernetes.io/part-of: chatflow
+        chatflow.io/role: wa-client
+        chatflow.io/user-id: "{USER_ID}"
+    automountServiceAccountToken: true
+
+  # -------------------------------------------------------------------------
+  # RoleBinding — bind the per-user SA to the wa-pod base Role
+  # (chatflow-wa-pod-base is defined in 07-orchestrator.yaml)
+  # -------------------------------------------------------------------------
+  - apiVersion: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    metadata:
+      name: chatflow-pod-{USER_ID}
+      namespace: chatflow
+      labels:
+        app.kubernetes.io/name: chatflow
+        app.kubernetes.io/component: wa-client
+        chatflow.io/user-id: "{USER_ID}"
+    subjects:
+      - kind: ServiceAccount
+        name: chatflow-pod-{USER_ID}
+        namespace: chatflow
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: Role
+      name: chatflow-wa-pod-base
+
+  # -------------------------------------------------------------------------
+  # ClusterIP Service — gateway resolves chatflow-pod-{USER_ID}.chatflow.svc
+  # -------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Service
+    metadata:
+      name: chatflow-pod-{USER_ID}
+      namespace: chatflow
+      labels:
+        app.kubernetes.io/name: chatflow
+        app.kubernetes.io/component: wa-client
+        chatflow.io/user-id: "{USER_ID}"
+    spec:
+      type: ClusterIP
+      selector:
+        chatflow.io/role: wa-client
+        chatflow.io/user-id: "{USER_ID}"
+      ports:
+        - { name: http, port: 8080, targetPort: 8080, protocol: TCP }
+
+  # -------------------------------------------------------------------------
+  # Pod — chatflow-pod-{USER_ID}
+  # -------------------------------------------------------------------------
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: chatflow-pod-{USER_ID}
+      namespace: chatflow
+      labels:
+        app.kubernetes.io/name: chatflow
+        app.kubernetes.io/component: wa-client
+        app.kubernetes.io/part-of: chatflow
+        chatflow.io/role: wa-client
+        chatflow.io/user-id: "{USER_ID}"
+      annotations:
+        chatflow.io/session-id: "{SESSION_ID}"
+    spec:
+      serviceAccountName: chatflow-pod-{USER_ID}
+      automountServiceAccountToken: true
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: wa-client
+          image: ghcr.io/sonic4002/chatflow-wa-pod@sha256:TODO-PIN-DIGEST
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: http, containerPort: 8080, protocol: TCP }
+          env:
+            # NOTE: USER_ID is informational/observational only. The pod's
+            # actual authority comes from its SA token (OpenBao policy bound
+            # to chatflow-pod-{USER_ID}). A pod that forges USER_ID in env
+            # cannot decrypt another user's Transit key.
+            - name: USER_ID
+              value: "{USER_ID}"
+            - name: SESSION_ID
+              value: "{SESSION_ID}"
+            - name: POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - name: HTTP_ADDR
+              value: ":8080"
+            - name: OPENBAO_ADDR
+              value: "http://openbao-service.chatflow.svc.cluster.local:8200"
+            - name: OPENBAO_K8S_ROLE
+              value: "chatflow-pod-{USER_ID}"
+            - name: OPENBAO_TRANSIT_KEY
+              value: "chatflow-{USER_ID}"
+            - name: EMQX_BROKER
+              value: "tcp://emqx-service.chatflow.svc.cluster.local:1883"
+            - name: DB_HOST
+              value: "postgres-service.chatflow.svc.cluster.local"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: SESSIONS_DB_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: SESSIONS_DB_PASSWORD } }
+            - name: DB_NAME
+              valueFrom: { secretKeyRef: { name: postgres-secret, key: SESSIONS_DB_NAME } }
+            - name: ORCHESTRATOR_URL
+              value: "http://orchestrator-service.chatflow.svc.cluster.local:8080"
+            # Phase 2: HPKE per-message encryption + pod-JWT MQTT auth.
+            # AUTH_INTERNAL_URL is hit with a projected SA token (audience
+            # chatflow-auth-internal) to acquire 1h pod-JWTs. ORCH_INTERNAL_URL
+            # is used to load device_keys before whatsmeow connect and to
+            # persist encrypted envelopes for /v1/chats?since= replay.
+            - name: AUTH_INTERNAL_URL
+              value: "http://auth-service.chatflow.svc.cluster.local:8080"
+            - name: ORCH_INTERNAL_URL
+              value: "http://orchestrator-service.chatflow.svc.cluster.local:8080"
+          resources:
+            # Phase 2 bump: HPKE seal per message + per-recipient wrap is
+            # CPU-bound; raise headroom for bursty inbound WA volume.
+            requests: { cpu: 500m,  memory: 64Mi }
+            limits:   { cpu: 2000m, memory: 256Mi }
+          livenessProbe:
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /ready, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - { name: scratch,             mountPath: /tmp }
+            - { name: openbao-token,       mountPath: /var/run/secrets/openbao,       readOnly: true }
+            - { name: auth-internal-token, mountPath: /var/run/secrets/auth-internal, readOnly: true }
+      volumes:
+        - name: scratch
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Mi
+        - name: openbao-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+                  audience: openbao
+        # Phase 2: separate audience-scoped projected token used by the
+        # pod when calling auth-service /internal/pod-jwt. Auth-service
+        # validates via TokenReview, then issues a 1h JWT bound to the
+        # SA's chatflow.io/user-id annotation (set at SA-create time by
+        # the orchestrator).
+        - name: auth-internal-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+                  audience: chatflow-auth-internal
+      imagePullSecrets:
+        - name: dockerhub-secret

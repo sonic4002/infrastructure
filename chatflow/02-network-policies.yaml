@@ -1,0 +1,619 @@
+---
+################################################################################
+# CiliumNetworkPolicies for the chatflow namespace
+#
+# Model:
+#   1. Default-deny baseline (default-deny-all-ingress, default-deny-all-egress)
+#   2. Allow rules per workload, additive
+#
+# Cilium evaluates `endpointSelector` against pod labels. Gateway-originated
+# traffic (Cilium Gateway API mode) uses the reserved `ingress` entity, NOT
+# regular pod selectors targeting the gateway namespace — see existing v1
+# policies for precedent.
+#
+# Labels used:
+#   app.kubernetes.io/name        : chatflow | postgres | emqx | openbao | chatflow-web
+#   app.kubernetes.io/component   : auth | orchestrator | gateway | wa-client |
+#                                    database | broker | secrets | frontend
+#   chatflow.io/role              : wa-client (canonical, matches ARCHITECTURE.md)
+################################################################################
+
+---
+# ---------------------------------------------------------------------------
+# Default deny — baseline
+# ---------------------------------------------------------------------------
+# Applies to every endpoint in the namespace; subsequent policies grant
+# specific ingress/egress paths additively.
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-deny-all-ingress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  # Selecting all endpoints with an empty `ingress` list triggers Cilium's
+  # default-deny semantics — every pod requires an explicit ingress allow
+  # in some other policy to receive traffic.
+  # NOTE: do NOT set `ingressDeny` here — Cilium denies override allows
+  # globally and would shadow every other policy in the namespace.
+  endpointSelector: {}
+  ingress: []
+
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: default-allow-dns-egress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  # Selecting all endpoints with an explicit non-empty `egress` triggers
+  # default-deny for egress AND grants the listed allows. We grant DNS
+  # universally; everything else must come from per-workload policies.
+  endpointSelector: {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: UDP
+            - port: "53"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# Auth Service
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: auth-service-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: auth
+
+  ingress:
+    # Public API via Cilium Gateway (api.chatflowpro.live -> /auth/* and JWKS)
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # In-cluster JWKS fetches and OTP API calls by gateway, EMQX, etc.
+    # L7 HTTP method/path filtering deferred to Phase 4 (requires Envoy
+    # L7 proxy mode; without it the L7 rule blocks all traffic).
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: chatflow
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+  egress:
+    # Postgres (chatflow_auth)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # Twilio (SMS) — public HTTPS.
+    # Cilium FQDN policies require the DNS proxy to learn IPs from the DNS
+    # response, so we add an L7 DNS rule for *.twilio.com on port 53 first.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*.twilio.com"
+              - matchPattern: "*"
+    - toFQDNs:
+        - matchPattern: "*.twilio.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # OpenBao (Auth Service may use Transit for OTP-secret encryption)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: openbao
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orchestrator-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: orchestrator
+
+  ingress:
+    # Public API via Cilium Gateway (none currently — orchestrator is internal)
+    # Gateway service calls orchestrator for pod provisioning.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: gateway
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # WA pods may call back for status updates / handshake bookkeeping.
+    - fromEndpoints:
+        - matchLabels:
+            chatflow.io/role: wa-client
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+  egress:
+    # Postgres (chatflow_orchestrator)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # OpenBao — provisions per-user Transit keys + PKI roles + K8s auth bindings
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: openbao
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+    # Kubernetes API server — manages WA pods, ServiceAccounts, RBAC
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+    # WA pods (orchestrator may proxy admin calls)
+    - toEndpoints:
+        - matchLabels:
+            chatflow.io/role: wa-client
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# Gateway
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: gateway-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: gateway
+
+  ingress:
+    # Public traffic via Cilium Gateway (api.chatflowpro.live -> /v1/*)
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+  egress:
+    # Auth Service (JWKS fetch)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: auth
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # Orchestrator (provision pods, list user pods)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # WA pods (forward commands)
+    - toEndpoints:
+        - matchLabels:
+            chatflow.io/role: wa-client
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# WA pods (per-user, dynamically provisioned by orchestrator)
+# ---------------------------------------------------------------------------
+# Selector matches the canonical chatflow.io/role label declared in
+# 09-wa-pod-template.yaml. Architecture invariant #2: pods are reachable
+# only from the gateway (control plane) and are never exposed publicly.
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: wa-pod-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      chatflow.io/role: wa-client
+
+  ingress:
+    # ONLY the gateway and orchestrator may call wa-pods.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: gateway
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+  egress:
+    # EMQX (publish events + handshake)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: emqx
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+            - port: "8883"
+              protocol: TCP
+    # OpenBao (Transit decrypt of WA token blob, PKI for pod cert)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: openbao
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+    # Postgres (read encrypted blob from chatflow_sessions)
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: postgres
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+    # WhatsApp servers + APNs/FCM. Cilium FQDN policies require the DNS
+    # proxy to learn IPs from DNS responses. The DNS L7 rule MUST cover
+    # every subdomain depth — `*` matches a single DNS label so for
+    # nested hostnames like media-atl3-2.cdn.whatsapp.net we list the
+    # specific patterns. WhatsApp uses *.whatsapp.net (chat),
+    # *.cdn.whatsapp.net (media), *.g.whatsapp.net (groups), and
+    # mmg.whatsapp.net family for media uploads.
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*.whatsapp.net"
+              - matchPattern: "*.whatsapp.com"
+              - matchPattern: "*.cdn.whatsapp.net"
+              - matchPattern: "*.g.whatsapp.net"
+              - matchPattern: "*.mmg.whatsapp.net"
+              - matchPattern: "*.push.apple.com"
+              - matchPattern: "fcm.googleapis.com"
+              - matchPattern: "*"
+    - toFQDNs:
+        - matchPattern: "*.whatsapp.net"
+        - matchPattern: "*.whatsapp.com"
+        - matchPattern: "*.cdn.whatsapp.net"
+        - matchPattern: "*.g.whatsapp.net"
+        - matchPattern: "*.mmg.whatsapp.net"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "5222"
+              protocol: TCP
+    # APNs / FCM (Phase 2+; declared up-front for stability)
+    - toFQDNs:
+        - matchName: "api.push.apple.com"
+        - matchName: "api.sandbox.push.apple.com"
+        - matchName: "fcm.googleapis.com"
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+    # Orchestrator callbacks (wa-pod -> orchestrator status updates).
+    # phase 2: also used for /internal/messages/{user_id} (encrypted envelope
+    # persistence) and /internal/users/{user_id}/devices (device_keys load).
+    # NetworkPolicies are L3/L4 only; same port 8080 covers all paths.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # phase 2: required by wa-pod -> auth-service /internal/pod-jwt for
+    # acquiring the per-pod JWT used to authenticate to EMQX.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: auth
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# Postgres
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: postgres-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: auth
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+        - matchLabels:
+            chatflow.io/role: wa-client
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+  # Postgres has no need to egress beyond DNS (which the default policy grants).
+
+---
+# ---------------------------------------------------------------------------
+# OpenBao
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openbao-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: openbao
+
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            chatflow.io/role: wa-client
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+        - matchLabels:
+            app.kubernetes.io/component: auth
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+    # Init Job (one-shot) needs to talk to OpenBao API.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: secrets-init
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+
+  egress:
+    # Kubernetes API server — TokenReview for K8s auth method
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# OpenBao init Job (secrets-init) — needs egress to openbao + kube-apiserver
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: openbao-init-egress
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: secrets-init
+  egress:
+    # OpenBao API
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: openbao
+      toPorts:
+        - ports:
+            - port: "8200"
+              protocol: TCP
+    # Kubernetes API server — Job creates the openbao-root-token Secret
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+            - port: "6443"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# EMQX
+# ---------------------------------------------------------------------------
+# EMQX is publicly reachable through the chatflow-mqtt section of platform-gateway
+# (WebSocket on :8083) AND directly via the LoadBalancer Service for native MQTT
+# clients on :8883. Pod-to-pod ingress is restricted below.
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: emqx-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: emqx
+
+  ingress:
+    # Cilium Gateway (chatflowpro.live -> mqtt route)
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "8083"   # MQTT-over-WS (Cilium Gateway termination)
+              protocol: TCP
+    # External LoadBalancer — for native MQTT clients (mobile, Phase 2+)
+    - fromEntities:
+        - world
+      toPorts:
+        - ports:
+            - port: "8883"   # native MQTT TLS
+              protocol: TCP
+            - port: "8084"   # MQTT-over-WSS (TLS terminated at EMQX)
+              protocol: TCP
+    # Internal: WA pods publish events / handshake on TCP 1883
+    - fromEndpoints:
+        - matchLabels:
+            chatflow.io/role: wa-client
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "1883"
+              protocol: TCP
+    # EMQX cluster peers (for future multi-node)
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: emqx
+      toPorts:
+        - ports:
+            - port: "4370"
+              protocol: TCP
+            - port: "5369"
+              protocol: TCP
+
+  egress:
+    # JWKS validation against Auth Service (and, phase 2+, kickout API
+    # trigger). L7 HTTP filtering deferred to Phase 4 per ns-wide policy
+    # comment above; we only restrict at L3/L4 for now.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: auth
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+---
+# ---------------------------------------------------------------------------
+# chatflow-web (frontend)
+# ---------------------------------------------------------------------------
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: chatflow-web-policy
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: chatflow
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: chatflow
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/name: chatflow-web
+
+  ingress:
+    # Cilium Gateway proxy connects directly to the pod's listening port.
+    # Next.js standalone listens on 3000 (Service has port 80 -> targetPort 3000).
+    - fromEntities:
+        - ingress
+      toPorts:
+        - ports:
+            - port: "3000"
+              protocol: TCP
