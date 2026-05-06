@@ -1,0 +1,363 @@
+---
+################################################################################
+# EMQX 5.8.5 — Phase 2 cutover STAGE A (chained authn: JWT + built_in_database)
+#
+# Applied at cutover step 4a. The JWT authenticator runs first; on "no match"
+# (missing/invalid JWT password) the chain falls through to built_in_database
+# so legacy chatflow-pod / chatflow-client static creds keep working during
+# coexistence. Stage B (04-emqx-stageB.yaml) drops built_in_database + the
+# bootstrap-users init container once Phase 2 traffic is verified.
+#
+# VERIFIED IN KIND (P2-V):
+#   - EMQX 5.8.5 has no ${jwt.<claim>} placeholder syntax. JWT sub binds to
+#     MQTT username via verify_claims.sub = "${username}", then variform
+#     `expression = "username"` promotes username -> client_attrs.user_id.
+#   - device_id encoded in clientid via ':' separator (UUIDs contain '-', so
+#     '-' won't tokenize cleanly): nth(2, tokens(clientid, ':')).
+#   - acl_claim_name DROPPED — JWT authn returns hard error (not chain
+#     "ignore" fall-through) on misshapen scope claim. File-based ACL only.
+#   - ConfigMap-based authn changes are overridden by EMQX dashboard writes
+#     to data/configs/cluster.hocon. Stage-B procedure wipes it before apply.
+#
+# Logging: pinned to info. NEVER set debug in prod — CONNECT packets log
+# JWT-passwords at debug level.
+################################################################################
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: emqx-config
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+data:
+  emqx.conf: |
+    node {
+      cookie = "${EMQX_NODE_COOKIE}"
+      data_dir = "/opt/emqx/data"
+    }
+
+    cluster {
+      discovery_strategy = dns
+      dns {
+        record_type = srv
+        name = "emqx-headless.chatflow.svc.cluster.local"
+      }
+    }
+
+    listeners.tcp.default {
+      bind = "0.0.0.0:1883"
+      max_connections = 10000
+    }
+
+    listeners.ws.default {
+      bind = "0.0.0.0:8083"
+      max_connections = 50000
+      websocket {
+        mqtt_path = "/mqtt"
+      }
+    }
+
+    listeners.ssl.default {
+      bind = "0.0.0.0:8883"
+      max_connections = 50000
+      enable = false
+    }
+
+    listeners.wss.default {
+      bind = "0.0.0.0:8084"
+      enable = false
+    }
+
+    ##########################################################################
+    # Authentication chain (Stage A): JWT first, fall through to built_in_db.
+    # JWT authn: verify_claims.sub = ${username} binds JWT sub to MQTT
+    # username. Variform client_attrs_init then promotes username ->
+    # client_attrs.user_id and clientid ":" segment 2 -> client_attrs.device_id.
+    ##########################################################################
+    authentication = [
+      {
+        mechanism = jwt
+        use_jwks = true
+        endpoint = "http://auth-service.chatflow.svc.cluster.local:8080/.well-known/jwks.json"
+        refresh_interval = 30
+        verify_claims = {
+          aud = "chatflow-emqx"
+          sub = "${username}"
+        }
+        from = password
+        leeway = 30
+        # NOTE: do NOT set acl_claim_name. The JWT authenticator returns
+        # hard error (not chain "ignore" fall-through) on misshapen scope
+        # claim. File-based ACL handles authorization.
+      },
+      {
+        # stage-A only — remove in stage-B once Phase 2 deploys verified
+        mechanism = password_based
+        backend = built_in_database
+        user_id_type = username
+        bootstrap_file = "/opt/emqx/data/bootstrap/users.json"
+        bootstrap_type = "plain"
+        password_hash_algorithm {
+          name = sha256
+          salt_position = "suffix"
+        }
+      }
+    ]
+
+    mqtt {
+      client_attrs_init = [
+        { expression = "username",                       set_as_attr = "user_id" },
+        { expression = "nth(2, tokens(clientid, ':'))",  set_as_attr = "device_id" }
+      ]
+      max_inflight = 100
+      max_packet_size = "256KB"
+      idle_timeout = "60s"
+      max_topic_alias = 65535
+      retry_interval = "30s"
+      # Persistent session: 100 msg/day x 7d x 70x safety margin.
+      session_expiry_interval = 7d
+      max_mqueue_len = 50000
+      mqueue.store_qos0 = false
+    }
+
+    ##########################################################################
+    # Authorization: default-deny + file-based ACL.
+    # deny_action = disconnect ensures violators don't silently quiesce.
+    ##########################################################################
+    authorization {
+      no_match = deny
+      deny_action = disconnect
+      sources = [
+        { type = file, enable = true, path = "etc/acl.conf" }
+      ]
+    }
+
+    retainer {
+      enable = true
+      max_payload_size = "16KB"
+      msg_expiry_interval = "24h"
+      flow_control { batch_deliver_number = 100 }
+    }
+
+    dashboard {
+      listeners.http {
+        bind = "0.0.0.0:18083"
+      }
+      default_username = "admin"
+      default_password = "${EMQX_DASHBOARD_DEFAULT_PASSWORD}"
+    }
+
+    # NEVER set to debug in prod — CONNECT packets log JWT passwords at debug.
+    log.console.level = info
+
+  acl.conf: |
+    %% ChatFlow MQTT ACL — Phase 2 (verified syntax, P2-V).
+    %% client_attrs.user_id and client_attrs.device_id populated by variform
+    %% expressions in mqtt.client_attrs_init above.
+    %% clientid format: web:<device_id> for web/mobile, pod:<session_id> for wa-pod.
+
+    %% Web user
+    {allow, {clientid, {re, "^web:.+"}}, subscribe,
+      ["chatflow/${client_attrs.user_id}/+/+",
+       "chatflow/${client_attrs.user_id}/handshake"]}.
+    {allow, {clientid, {re, "^web:.+"}}, publish,
+      ["chatflow/${client_attrs.user_id}/cmd/${client_attrs.device_id}"]}.
+
+    %% Pod (publish only)
+    {allow, {clientid, {re, "^pod:.+"}}, publish,
+      ["chatflow/${client_attrs.user_id}/+/+",
+       "chatflow/${client_attrs.user_id}/handshake"]}.
+
+    %% Default deny (also enforced by authorization.no_match = deny).
+    {deny, all}.
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: emqx
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+spec:
+  serviceName: emqx-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: emqx
+      app.kubernetes.io/component: broker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: emqx
+        app.kubernetes.io/component: broker
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # stage-A only — remove in stage-B once Phase 2 deploys verified
+        - name: bootstrap-users
+          image: alpine:3.19
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              umask 077
+              mkdir -p /opt/emqx/data/bootstrap
+              cat > /opt/emqx/data/bootstrap/users.json <<EOF
+              [
+                {"user_id": "${POD_USERNAME}", "password": "${POD_PASSWORD}", "is_superuser": false},
+                {"user_id": "${CLIENT_USERNAME}", "password": "${CLIENT_PASSWORD}", "is_superuser": false}
+              ]
+              EOF
+              chmod 0640 /opt/emqx/data/bootstrap/users.json
+              echo "wrote bootstrap users for: ${POD_USERNAME}, ${CLIENT_USERNAME}"
+          envFrom:
+            - secretRef:
+                name: chatflow-mqtt-credentials
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          volumeMounts:
+            - name: emqx-data
+              mountPath: /opt/emqx/data
+      containers:
+        - name: emqx
+          image: emqx/emqx:5.8.5
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: mqtt-tcp,    containerPort: 1883,  protocol: TCP }
+            - { name: mqtt-ws,     containerPort: 8083,  protocol: TCP }
+            - { name: mqtt-wss,    containerPort: 8084,  protocol: TCP }
+            - { name: mqtts,       containerPort: 8883,  protocol: TCP }
+            - { name: dashboard,   containerPort: 18083, protocol: TCP }
+            - { name: cluster-rpc, containerPort: 5369,  protocol: TCP }
+            - { name: cluster-ekk, containerPort: 4370,  protocol: TCP }
+          env:
+            - name: EMQX_NAME
+              value: emqx
+            - name: EMQX_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: EMQX_NODE_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: chatflow-mqtt-credentials
+                  key: NODE_COOKIE
+            - name: EMQX_DASHBOARD_DEFAULT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chatflow-mqtt-credentials
+                  key: DASHBOARD_PASSWORD
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 18083
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 18083
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: emqx-data,   mountPath: /opt/emqx/data }
+            - { name: emqx-config, mountPath: /opt/emqx/etc/emqx.conf, subPath: emqx.conf }
+            - { name: emqx-config, mountPath: /opt/emqx/etc/acl.conf,  subPath: acl.conf }
+      volumes:
+        - name: emqx-config
+          configMap:
+            name: emqx-config
+  volumeClaimTemplates:
+    - metadata:
+        name: emqx-data
+        labels:
+          app.kubernetes.io/name: emqx
+          app.kubernetes.io/component: broker
+          app.kubernetes.io/part-of: chatflow
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx-headless
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+  ports:
+    - { name: mqtt-tcp,    port: 1883,  targetPort: 1883 }
+    - { name: mqtt-ws,     port: 8083,  targetPort: 8083 }
+    - { name: cluster-rpc, port: 5369,  targetPort: 5369 }
+    - { name: cluster-ekk, port: 4370,  targetPort: 4370 }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+  ports:
+    - { name: mqtt-tcp, port: 1883, targetPort: 1883 }
+    - { name: mqtt-ws,  port: 8083, targetPort: 8083 }
+    - { name: dashboard, port: 18083, targetPort: 18083 }
