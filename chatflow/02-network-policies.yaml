@@ -145,6 +145,17 @@ spec:
         - ports:
             - port: "8200"
               protocol: TCP
+    # Kubernetes API server (TokenReview to validate wa-pod ServiceAccount
+    # tokens in /internal/pod-jwt before issuing the per-pod MQTT JWT).
+    - toEntities:
+        - kube-apiserver
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+        - ports:
+            - port: "6443"
+              protocol: TCP
 
 ---
 # ---------------------------------------------------------------------------
@@ -216,6 +227,25 @@ spec:
       toPorts:
         - ports:
             - port: "8080"
+              protocol: TCP
+    # Auth-service: orchestrator calls /internal/pod-jwt to mint
+    # service-principal JWTs for the EMQX system-topic publisher, and
+    # /internal/users/{uid}/revoke-refresh-tokens during Teardown.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: auth
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # EMQX: orchestrator publishes server->client force_logout events
+    # on chatflow/{user_id}/system (see docs/contracts/system-topic-v1.md).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/name: emqx
+      toPorts:
+        - ports:
+            - port: "1883"
               protocol: TCP
 
 ---

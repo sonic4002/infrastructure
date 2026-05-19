@@ -26,6 +26,12 @@ metadata:
     app.kubernetes.io/name: chatflow
     app.kubernetes.io/component: orchestrator
     app.kubernetes.io/part-of: chatflow
+  annotations:
+    # Selects the service-role branch in auth-service /internal/pod-jwt
+    # (see chatflow/docs/contracts/internal-pod-jwt-service-role.md).
+    # Returned JWT carries sub=svc:orchestrator:<session_id>,
+    # aud=chatflow-emqx, scope=[svc:publish:system].
+    chatflow.io/service-role: orchestrator
 automountServiceAccountToken: true
 
 ---
@@ -194,9 +200,22 @@ spec:
               # orchestrator falls back to "unset-<startup-unix>", which means
               # every orchestrator restart triggers a one-shot recycle wave
               # (loud in logs, fine for Phase 1 with one user).
-              value: "wapod-b5d92a9-1778102172"
+              value: "wapod-11c4a3e-1778241096"
             - name: WA_POD_BASE_ROLE
               value: "chatflow-wa-pod-base"
+            # System-topic MQTT publisher (server->client force_logout
+            # events). See chatflow/docs/contracts/system-topic-v1.md.
+            # If SYSTEM_MQTT_BROKER_URL is empty the publisher is
+            # disabled and destructive ops proceed without notifying
+            # the client (15s state poll remains the fallback).
+            - name: SYSTEM_MQTT_BROKER_URL
+              value: "tcp://emqx-service.chatflow.svc.cluster.local:1883"
+            - name: SYSTEM_MQTT_SA_TOKEN_FILE
+              value: "/var/run/secrets/auth-internal/token"
+            - name: ORCHESTRATOR_FORCE_LOGOUT_GRACE_MS
+              value: "1500"
+            - name: ORCHESTRATOR_IDLE_TEARDOWN_DAYS
+              value: "30"
           resources:
             requests: { cpu: 100m, memory: 128Mi }
             limits:   { cpu: 500m, memory: 512Mi }
@@ -209,8 +228,9 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 5
           volumeMounts:
-            - { name: openbao-token, mountPath: /var/run/secrets/openbao, readOnly: true }
-            - { name: tmp,           mountPath: /tmp }
+            - { name: openbao-token,    mountPath: /var/run/secrets/openbao,        readOnly: true }
+            - { name: auth-internal-token, mountPath: /var/run/secrets/auth-internal, readOnly: true }
+            - { name: tmp,              mountPath: /tmp }
       volumes:
         - name: openbao-token
           projected:
@@ -219,6 +239,17 @@ spec:
                   path: token
                   expirationSeconds: 3600
                   audience: openbao
+        # Projected SA token used by the system-topic MQTT publisher to
+        # authenticate to auth-service /internal/pod-jwt and obtain a
+        # JWT with sub=svc:orchestrator, aud=chatflow-emqx. Auth-service
+        # WS-A2 added the service-role allowlist for this SA.
+        - name: auth-internal-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 3600
+                  audience: chatflow-auth-internal
         - name: tmp
           emptyDir:
             medium: Memory

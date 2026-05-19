@@ -84,13 +84,28 @@ data:
           sub = "${username}"
         }
         from = password
-        leeway = 30
+        # NOTE: `leeway` is NOT a valid field on authn:jwt_jwks in
+        # EMQX 5.8.5 (see stage-A which omits it). Removed to fix the
+        # call_hocon_failed startup loop. EMQX still accepts a small
+        # clock skew internally; if precise control is needed, the
+        # field would be `disconnect_after_expire` (boolean) — leaving
+        # default for now.
       }
     ]
 
     mqtt {
       client_attrs_init = [
-        { expression = "username",                       set_as_attr = "user_id" },
+        # user_id extraction:
+        #   web:  username = "<uuid>"            → user_id = "<uuid>"
+        #   pod:  username = "pod:<uuid>:<sid>"  → user_id = "<uuid>"
+        # coalesce returns the first non-empty value: try the 2nd token
+        # of username first (works for pod), fall back to username (web).
+        { expression = "coalesce(nth(2, tokens(username, ':')), username)", set_as_attr = "user_id" },
+        # device_id:
+        #   web:  clientid = "web:<deviceid>" → device_id = "<deviceid>"
+        #   pod:  device_id is unused in the pod ACL; expression result is
+        #         the user_id segment, which is fine because the ACL
+        #         allow-rule for pods does not reference device_id.
         { expression = "nth(2, tokens(clientid, ':'))",  set_as_attr = "device_id" }
       ]
       max_inflight = 100
@@ -100,7 +115,8 @@ data:
       retry_interval = "30s"
       session_expiry_interval = 7d
       max_mqueue_len = 50000
-      mqueue.store_qos0 = false
+      # NOTE: mqueue.store_qos0 is NOT a valid mqtt.* field in EMQX
+      # 5.8.5 — see comment in stage-A. Defaults are fine.
     }
 
     authorization {
@@ -126,14 +142,17 @@ data:
       default_password = "${EMQX_DASHBOARD_DEFAULT_PASSWORD}"
     }
 
-    # NEVER set to debug in prod — CONNECT packets log JWT passwords at debug.
-    log.console.level = info
+    # TEMPORARY debug — investigating JWT authn rejection. Revert to
+    # info once root cause is found (CONNECT packets log JWT passwords
+    # at debug, so this is sensitive).
+    log.console.level = debug
 
   acl.conf: |
     %% Web user
     {allow, {clientid, {re, "^web:.+"}}, subscribe,
       ["chatflow/${client_attrs.user_id}/+/+",
-       "chatflow/${client_attrs.user_id}/handshake"]}.
+       "chatflow/${client_attrs.user_id}/handshake",
+       "chatflow/${client_attrs.user_id}/system"]}.
     {allow, {clientid, {re, "^web:.+"}}, publish,
       ["chatflow/${client_attrs.user_id}/cmd/${client_attrs.device_id}"]}.
 
@@ -141,6 +160,23 @@ data:
     {allow, {clientid, {re, "^pod:.+"}}, publish,
       ["chatflow/${client_attrs.user_id}/+/+",
        "chatflow/${client_attrs.user_id}/handshake"]}.
+
+    %% Orchestrator service principal — publish-only on the control-plane
+    %% system topic (server->client force_logout events, see
+    %% chatflow/docs/contracts/system-topic-v1.md and
+    %% chatflow/docs/contracts/internal-pod-jwt-service-role.md).
+    %%
+    %% The auth-service service-role path issues JWTs with
+    %% sub=svc:orchestrator:<session_id>. EMQX's verify_claims pins
+    %% sub == ${username}, and our publisher uses clientId == username,
+    %% so clientId matches the regex ^svc:orchestrator:.+ — the
+    %% trailing per-session segment lets EMQX session-takeover handle
+    %% publisher restarts cleanly.
+    %%
+    %% Topic wildcard intentionally spans all users; the orchestrator
+    %% is the only authoritative emitter for the system topic.
+    {allow, {clientid, {re, "^svc:orchestrator:.+"}}, publish,
+      ["chatflow/+/system"]}.
 
     {deny, all}.
 
@@ -195,10 +231,16 @@ spec:
           env:
             - name: EMQX_NAME
               value: emqx
-            - name: EMQX_HOST
+            - name: POD_NAME
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP
+                  fieldPath: metadata.name
+            # Use the headless-service FQDN, not the pod IP. Ekka discovery is
+            # configured for SRV records (returns FQDNs); naming the node by
+            # IP causes "Cannot get connection id" log spam every ~13s as the
+            # local node and the discovered name never match.
+            - name: EMQX_HOST
+              value: "$(POD_NAME).emqx-headless.chatflow.svc.cluster.local"
             - name: EMQX_NODE_COOKIE
               valueFrom:
                 secretKeyRef:
