@@ -1,0 +1,379 @@
+---
+################################################################################
+# EMQX 5.x — public MQTT broker (WSS + native TLS)
+#
+# Auth model:
+#   - JWT validation against Auth Service JWKS (Ed25519). No shared secrets.
+#   - Topic ACLs are CLAIM-DRIVEN: client connects with JWT in MQTT password,
+#     EMQX extracts `sub`, `device_id`, `aud`, then enforces template ACLs
+#     scoped to that user's namespace and that device's command channel.
+#
+# Topics (per ARCHITECTURE.md "MQTT topic ACLs"):
+#   chatflow/{user_id}/events/incoming   pod publish, devices subscribe
+#   chatflow/{user_id}/events/status     pod publish, devices subscribe
+#   chatflow/{user_id}/handshake         pod publish (retained)
+#   chatflow/{user_id}/cmd/{device_id}   one device publishes, pod subscribes
+#   chatflow/{user_id}/admin             pod-only
+#
+# IMPORTANT - placeholder syntax verification (TODO before first deploy):
+# EMQX 5.5+ exposes JWT claims to ACL rules under different names depending
+# on EMQX version. The HOCON below uses `${client_attrs.user_id}` which is
+# the standard EMQX 5.4+ form when `from = "password"` and JWT custom claims
+# are mapped via `claims_filter`. If your EMQX image differs, swap to
+# `${user_property.sub}` or `${cert_common_name}` as appropriate.
+################################################################################
+
+---
+# ---------------------------------------------------------------------------
+# ConfigMap — emqx.conf (HOCON, EMQX 5.x format)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: emqx-config
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+data:
+  emqx.conf: |
+    node {
+      cookie = "${EMQX_NODE_COOKIE}"
+      data_dir = "/opt/emqx/data"
+    }
+
+    cluster {
+      discovery_strategy = dns
+      dns {
+        record_type = srv
+        name = "emqx-headless.chatflow.svc.cluster.local"
+      }
+    }
+
+    listeners.tcp.default {
+      bind = "0.0.0.0:1883"
+      max_connections = 10000
+      # Internal TCP listener — only WA pods + orchestrator reach this
+      # (network policy enforces). For public clients use ws.default.
+    }
+
+    listeners.ws.default {
+      bind = "0.0.0.0:8083"
+      max_connections = 50000
+      websocket {
+        mqtt_path = "/mqtt"
+      }
+    }
+
+    listeners.ssl.default {
+      bind = "0.0.0.0:8883"
+      max_connections = 50000
+      enable = false   # TODO Phase 2: enable once cert-manager issues mqtt cert
+    }
+
+    listeners.wss.default {
+      bind = "0.0.0.0:8084"
+      enable = false   # TODO Phase 2
+    }
+
+    ##########################################################################
+    # Authentication: Phase 1 uses built-in database with bootstrap users.
+    # Two static usernames are seeded by the init container from the
+    # chatflow-mqtt-credentials Secret:
+    #   - chatflow-pod    (used by all wa-pods)
+    #   - chatflow-client (used by all web/mobile clients in Phase 1)
+    # Both passwords are random 192-bit values mounted via env vars and
+    # written to /opt/emqx/data/bootstrap/users.csv at pod start.
+    #
+    # Phase 2 will replace this with JWT validation against Auth Service JWKS
+    # (per ARCHITECTURE.md "MQTT topic ACLs"). The two static credentials are
+    # deliberately coarse: per-user isolation is a Phase 2 deliverable.
+    ##########################################################################
+    authentication = [
+      {
+        mechanism = password_based
+        backend = built_in_database
+        user_id_type = username
+        bootstrap_file = "/opt/emqx/data/bootstrap/users.json"
+        bootstrap_type = "plain"
+        password_hash_algorithm {
+          name = sha256
+          salt_position = "suffix"
+        }
+      }
+    ]
+
+    ##########################################################################
+    # Authorization: Phase 1 allow-all (any AUTHENTICATED client). Auth above
+    # is the access gate; topic isolation is Phase 2.
+    ##########################################################################
+    authorization {
+      no_match = allow
+      deny_action = ignore
+      cache { enable = true }
+    }
+
+    ##########################################################################
+    # MQTT session settings — hold queued events while clients reconnect
+    ##########################################################################
+    mqtt {
+      max_mqueue_len = 1000
+      max_inflight = 100
+      max_packet_size = "256KB"
+      idle_timeout = "60s"
+      max_topic_alias = 65535
+      retry_interval = "30s"
+      session_expiry_interval = "2h"
+    }
+
+    retainer {
+      enable = true
+      max_payload_size = "16KB"
+      msg_expiry_interval = "24h"
+      flow_control { batch_deliver_number = 100 }
+    }
+
+    dashboard {
+      listeners.http {
+        bind = "0.0.0.0:18083"
+      }
+      default_username = "admin"
+      default_password = "${EMQX_DASHBOARD_DEFAULT_PASSWORD}"
+    }
+
+    log {
+      console { level = info }
+    }
+
+  acl.conf: |
+    %% ChatFlow MQTT ACL — derived from ARCHITECTURE.md "MQTT topic ACLs".
+    %% Placeholder syntax: ${client_attrs.user_id} and ${client_attrs.device_id}
+    %% are populated by the JWT auth backend mapping `sub` -> user_id and
+    %% custom claim `device_id` -> device_id.
+
+    %% --- Subscribe ---
+    %% A user's devices may subscribe to their own user namespace events
+    %% and the retained handshake.
+    {allow, {client_attrs, "user_id"}, subscribe,
+       ["chatflow/${client_attrs.user_id}/events/+",
+        "chatflow/${client_attrs.user_id}/handshake"]}.
+
+    %% --- Publish ---
+    %% A device may publish ONLY to its own device-scoped command channel.
+    {allow, {client_attrs, "user_id"}, publish,
+       ["chatflow/${client_attrs.user_id}/cmd/${client_attrs.device_id}"]}.
+
+    %% --- Pod-only topic (admin) ---
+    %% WA pods authenticate via cert/internal credentials, not the user JWT;
+    %% pod-side publish to /admin is granted by the internal-only ACL profile
+    %% the pod loads at startup (kept here as documentation).
+
+    %% Default deny everything else.
+    {deny, all, all, ["#"]}.
+
+---
+# ---------------------------------------------------------------------------
+# StatefulSet
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: emqx
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+spec:
+  serviceName: emqx-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: emqx
+      app.kubernetes.io/component: broker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: emqx
+        app.kubernetes.io/component: broker
+        app.kubernetes.io/part-of: chatflow
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: bootstrap-users
+          image: alpine:3.19
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              umask 077
+              mkdir -p /opt/emqx/data/bootstrap
+              # EMQX 5.8+ JSON bootstrap format. Each object: { user_id, password, is_superuser }
+              # EMQX hashes the password (sha256+salt) on first startup.
+              cat > /opt/emqx/data/bootstrap/users.json <<EOF
+              [
+                {"user_id": "${POD_USERNAME}", "password": "${POD_PASSWORD}", "is_superuser": false},
+                {"user_id": "${CLIENT_USERNAME}", "password": "${CLIENT_PASSWORD}", "is_superuser": false}
+              ]
+              EOF
+              chmod 0640 /opt/emqx/data/bootstrap/users.json
+              echo "wrote bootstrap users for: ${POD_USERNAME}, ${CLIENT_USERNAME}"
+          envFrom:
+            - secretRef:
+                name: chatflow-mqtt-credentials
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+          volumeMounts:
+            - name: emqx-data
+              mountPath: /opt/emqx/data
+      containers:
+        - name: emqx
+          image: emqx/emqx:5.8.5
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: mqtt-tcp,    containerPort: 1883,  protocol: TCP }
+            - { name: mqtt-ws,     containerPort: 8083,  protocol: TCP }
+            - { name: mqtt-wss,    containerPort: 8084,  protocol: TCP }
+            - { name: mqtts,       containerPort: 8883,  protocol: TCP }
+            - { name: dashboard,   containerPort: 18083, protocol: TCP }
+            - { name: cluster-rpc, containerPort: 5369,  protocol: TCP }
+            - { name: cluster-ekk, containerPort: 4370,  protocol: TCP }
+          env:
+            - name: EMQX_NAME
+              value: emqx
+            - name: EMQX_HOST
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: EMQX_NODE_COOKIE
+              valueFrom:
+                secretKeyRef:
+                  name: chatflow-mqtt-credentials
+                  key: NODE_COOKIE
+            - name: EMQX_DASHBOARD_DEFAULT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: chatflow-mqtt-credentials
+                  key: DASHBOARD_PASSWORD
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 18083
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 18083
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - { name: emqx-data,   mountPath: /opt/emqx/data }
+            - { name: emqx-config, mountPath: /opt/emqx/etc/emqx.conf, subPath: emqx.conf }
+      volumes:
+        - name: emqx-config
+          configMap:
+            name: emqx-config
+  volumeClaimTemplates:
+    - metadata:
+        name: emqx-data
+        labels:
+          app.kubernetes.io/name: emqx
+          app.kubernetes.io/component: broker
+          app.kubernetes.io/part-of: chatflow
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+# ---------------------------------------------------------------------------
+# Headless Service — required by StatefulSet for stable DNS
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx-headless
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+  ports:
+    - { name: mqtt-tcp,    port: 1883,  targetPort: 1883 }
+    - { name: mqtt-ws,     port: 8083,  targetPort: 8083 }
+    - { name: cluster-rpc, port: 5369,  targetPort: 5369 }
+    - { name: cluster-ekk, port: 4370,  targetPort: 4370 }
+
+---
+# ---------------------------------------------------------------------------
+# ClusterIP Service — internal callers (HTTPRoute -> :8083, WA pods -> :1883)
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: emqx-service
+  namespace: chatflow
+  labels:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+    app.kubernetes.io/part-of: chatflow
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: emqx
+    app.kubernetes.io/component: broker
+  ports:
+    - { name: mqtt-tcp, port: 1883, targetPort: 1883 }
+    - { name: mqtt-ws,  port: 8083, targetPort: 8083 }
+    - { name: dashboard, port: 18083, targetPort: 18083 }
+
+---
+# External LoadBalancer for native MQTT (mobile clients) is DEFERRED to
+# Phase 2. Web clients use WSS through the Cilium gateway HTTPRoute
+# (mqtt.chatflowpro.live -> emqx-service:8083) which is sufficient for
+# Phase 1.
+#
+# When mobile arrives, re-add a LoadBalancer Service here for ports
+# 8883 (mqtts) and 8084 (mqtt-wss) — and bump
+# 12-resource-quota.yaml services.loadbalancers if needed.
