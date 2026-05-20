@@ -82,7 +82,11 @@ spec:
               value: "chatflow.svc.cluster.local"
               # Gateway constructs http://chatflow-pod-{user_id}.chatflow.svc...
             - name: JWT_AUDIENCE
-              value: "chatflow-gateway"
+              # Must match the access-token aud minted by auth-service
+              # (default in services/auth/main.go: "chatflow-api"). The
+              # previous value "chatflow-gateway" caused every /v1/* call
+              # to 401 because validation rejects an aud mismatch.
+              value: "chatflow-api"
             - name: RATE_LIMIT_PER_USER_PER_SEC
               value: "10"
           resources:
