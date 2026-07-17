@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: frontend
-          image: sonic4002/digital_solutions:xoffice-frontend-v264
+          image: sonic4002/digital_solutions:xoffice-frontend-v285
           imagePullPolicy: Always
           ports:
             - containerPort: 3000
