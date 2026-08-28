@@ -120,7 +120,10 @@ items:
       containers:
         - name: wa-client
           image: ghcr.io/sonic4002/chatflow-wa-pod@sha256:TODO-PIN-DIGEST
-          imagePullPolicy: IfNotPresent
+          # Always pull while we ship via mutable :latest tag. Once the
+          # image is pinned by digest (TODO above) this can revert to
+          # IfNotPresent — digest pins are immutable.
+          imagePullPolicy: Always
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
@@ -187,6 +190,7 @@ items:
             - { name: scratch,             mountPath: /tmp }
             - { name: openbao-token,       mountPath: /var/run/secrets/openbao,       readOnly: true }
             - { name: auth-internal-token, mountPath: /var/run/secrets/auth-internal, readOnly: true }
+            - { name: auth-jwt-keypair,    mountPath: /var/run/secrets/auth-jwt-keypair, readOnly: true }
       volumes:
         - name: scratch
           emptyDir:
@@ -211,5 +215,21 @@ items:
                   path: token
                   expirationSeconds: 3600
                   audience: chatflow-auth-internal
+        # Handshake signing key (Phase 1 stub — see ARCHITECTURE.md
+        # invariant #7). Kubelet mounts the Secret directly; no RBAC
+        # `get secrets` is needed on chatflow-wa-pod-base. K8s does NOT
+        # support TTL on Secret-sourced projected volumes — rotation is
+        # by Secret update + kid bump. Phase 2 replaces this with an
+        # OpenBao-PKI per-pod-run cert.
+        - name: auth-jwt-keypair
+          projected:
+            defaultMode: 0400
+            sources:
+              - secret:
+                  name: auth-jwt-keypair
+                  items:
+                    - { key: jwt-private.pem, path: jwt-private.pem }
+                    - { key: jwt-public.pem,  path: jwt-public.pem }
+                    - { key: kid,             path: kid }
       imagePullSecrets:
         - name: dockerhub-secret

@@ -266,10 +266,12 @@ spec:
           env:
             - name: EMQX_NAME
               value: emqx
-            - name: EMQX_HOST
+            - name: POD_NAME
               valueFrom:
                 fieldRef:
-                  fieldPath: status.podIP
+                  fieldPath: metadata.name
+            - name: EMQX_HOST
+              value: "$(POD_NAME).emqx-headless.chatflow.svc.cluster.local"
             - name: EMQX_NODE_COOKIE
               valueFrom:
                 secretKeyRef:

@@ -200,7 +200,7 @@ spec:
               # orchestrator falls back to "unset-<startup-unix>", which means
               # every orchestrator restart triggers a one-shot recycle wave
               # (loud in logs, fine for Phase 1 with one user).
-              value: "wapod-11c4a3e-1778241096"
+              value: "wapod-81621ce2-1781110306"
             - name: WA_POD_BASE_ROLE
               value: "chatflow-wa-pod-base"
             # System-topic MQTT publisher (server->client force_logout

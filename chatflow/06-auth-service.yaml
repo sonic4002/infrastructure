@@ -158,6 +158,13 @@ spec:
               value: "http://openbao-service.chatflow.svc.cluster.local:8200"
             - name: OPENBAO_K8S_ROLE
               value: "auth-service"
+            # Enables the device-revoke cascade AND the OTP-login session
+            # reconcile (converge a session stranded by a terminal token
+            # revoke whose teardown never completed — 2026-06-10 incident).
+            # auth-service-policy egress + orchestrator-policy ingress
+            # (02-network-policies.yaml) admit auth -> orchestrator:8080.
+            - name: ORCHESTRATOR_URL
+              value: "http://orchestrator-service.chatflow.svc.cluster.local:8080"
             # Phase 2: kickout flow needs EMQX dashboard API key. Until that
             # is provisioned (see docs/whatsapp_v2/infrastructure.md "EMQX
             # management API key provisioning"), opt out of the startup

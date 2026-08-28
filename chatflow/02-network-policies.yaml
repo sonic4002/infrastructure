@@ -145,6 +145,16 @@ spec:
         - ports:
             - port: "8200"
               protocol: TCP
+    # Orchestrator: auth calls /internal/sessions/{uid}/reconcile-login at
+    # OTP verify (converge a stranded session) and the device-revoke cascade
+    # /internal/users/{uid}/devices/{did}. Best-effort; never blocks login.
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: orchestrator
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
     # Kubernetes API server (TokenReview to validate wa-pod ServiceAccount
     # tokens in /internal/pod-jwt before issuing the per-pod MQTT JWT).
     - toEntities:
@@ -189,6 +199,15 @@ spec:
     - fromEndpoints:
         - matchLabels:
             chatflow.io/role: wa-client
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+    # Auth-service calls /internal/sessions/{uid}/reconcile-login at OTP
+    # verify (stranded-session convergence) and the device-revoke cascade.
+    - fromEndpoints:
+        - matchLabels:
+            app.kubernetes.io/component: auth
       toPorts:
         - ports:
             - port: "8080"

@@ -10,11 +10,20 @@ data:
   # CORS_ORIGINS is in the secret (xoffice-secrets) with the full list
   NEXT_PUBLIC_API_URL: "https://api.xoffice.cloud"
   API_URL: "https://api.xoffice.cloud"
+  # ChatFlow v2 integration (present in the live ConfigMap; kept here so an apply
+  # does not delete it)
+  CHATFLOW_V2_ENABLED: "true"
   # MQTT Integration (cross-service notifications via EMQX)
-  MQTT_ENABLED: "true"
+  # Disabled: the broker has never accepted a connection from this service, so the
+  # client only ever produced a 60s reconnect-failure loop. Task sync falls back to
+  # REST (MQTT_TASK_SYNC_ONLY is false). Flip back to "true" when EMQX is reachable.
+  MQTT_ENABLED: "false"
   MQTT_BROKER_URL: "tcp://emqx-service.chatflow.svc.cluster.local:1883"
   MQTT_CLIENT_ID: "xoffice-backend"
-  # Web Push VAPID (public key is not sensitive)
-  # IMPORTANT: Replace with the actual generated VAPID public key matching the private key in xoffice-secrets
-  VAPID_PUBLIC_KEY: "REPLACE_WITH_GENERATED_VAPID_PUBLIC_KEY"
-  VAPID_CONTACT_EMAIL: "mailto:admin@xoffice.cloud"
+  # Web Push VAPID (public key is not sensitive).
+  # Left unset on purpose: an empty vapid_public_key is the flag that keeps web push
+  # cleanly disabled (see push_subscriptions.py and push_subscription_service.py).
+  # Shipping the placeholder string would satisfy those guards and hand the browser an
+  # invalid key, so uncomment only together with VAPID_PRIVATE_KEY in xoffice-secrets.
+  # VAPID_PUBLIC_KEY: "<generated-public-key>"
+  # VAPID_CONTACT_EMAIL: "mailto:admin@xoffice.cloud"

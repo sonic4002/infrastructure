@@ -95,6 +95,14 @@ kubectl apply -f postgres-secret.yaml
 
 ### auth-jwt-keypair (Ed25519)
 
+Consumers (mounted via projected Secret volume, kubelet-supplied — no
+RBAC `get secrets` needed by the consumer's ServiceAccount):
+
+- `auth-service` — issues access/refresh JWTs, publishes JWKS.
+- `wa-pod` — signs the per-pod handshake on `chatflow/{user_id}/handshake`.
+  Pod refuses to start without the key unless `ALLOW_UNSIGNED_HANDSHAKE=true`.
+  See `chatflow/services/wa-pod/README.md` for the strict-by-default contract.
+
 ```bash
 openssl genpkey -algorithm Ed25519 -out auth-jwt.key
 openssl pkey -in auth-jwt.key -pubout -out auth-jwt.pub
