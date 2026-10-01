@@ -50,6 +50,50 @@ spec:
         request: 30s
         backendRequest: 30s
 ---
+# Customer portal Route -- customer.xoffice.cloud
+#
+# Same backend service as frontend-route: the frontend decides by the Host
+# header that it is the Customer portal (portal mode) and serves only the
+# portal's pages there. A separate route rather than a second hostname on
+# frontend-route, so the portal can be detached at the gateway on its own.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: customer-portal-route
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+spec:
+  parentRefs:
+    - name: platform-gateway
+      namespace: gateway
+      sectionName: xoffice-customer-portal
+  hostnames:
+    - customer.xoffice.cloud
+  rules:
+    # WebSocket connections get unlimited timeout
+    - matches:
+        - headers:
+            - name: Upgrade
+              value: websocket
+      backendRefs:
+        - name: xoffice-frontend-service
+          port: 80
+      timeouts:
+        request: "0s"
+        backendRequest: "0s"
+    # Regular HTTP requests
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: xoffice-frontend-service
+          port: 80
+      timeouts:
+        request: 30s
+        backendRequest: 30s
+---
 # Backend API Route -- api.xoffice.cloud
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute

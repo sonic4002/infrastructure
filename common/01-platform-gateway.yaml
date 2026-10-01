@@ -7,7 +7,7 @@
 #
 # Domains:
 #   chatflow:  api.chatflowpro.live, chatflowpro.live, mqtt.chatflowpro.live
-#   xoffice:   xoffice.cloud, api.xoffice.cloud
+#   xoffice:   xoffice.cloud, api.xoffice.cloud, customer.xoffice.cloud
 #
 # HTTPRoutes live in their respective app namespaces (chatflow, xoffice).
 # Each listener uses a namespace selector to control which namespaces can
@@ -82,6 +82,20 @@ spec:
       protocol: HTTP
       port: 80
       hostname: "api.xoffice.cloud"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: xoffice
+
+    # The Customer portal: the same xoffice frontend, which serves portal mode
+    # when it is reached on this host (one image, no separate deployment). It
+    # talks to the same api.xoffice.cloud as the staff host.
+    - name: xoffice-customer-portal
+      protocol: HTTP
+      port: 80
+      hostname: "customer.xoffice.cloud"
       allowedRoutes:
         namespaces:
           from: Selector
