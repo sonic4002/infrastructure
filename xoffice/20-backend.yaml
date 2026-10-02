@@ -21,7 +21,7 @@ spec:
             claimName: xoffice-avatars-pvc
       containers:
         - name: backend
-          image: sonic4002/digital_solutions:xoffice-backend-v257
+          image: sonic4002/digital_solutions:xoffice-backend-v260
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
