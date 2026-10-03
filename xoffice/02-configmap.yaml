@@ -10,6 +10,11 @@ data:
   # CORS_ORIGINS is in the secret (xoffice-secrets) with the full list
   NEXT_PUBLIC_API_URL: "https://api.xoffice.cloud"
   API_URL: "https://api.xoffice.cloud"
+  # The Customer portal's origin. The backend writes Portal invitation and
+  # Portal user password-reset links against it, and refuses a staff token
+  # arriving from it (and a portal token arriving from FRONTEND_URL).
+  # It must also be listed in CORS_ORIGINS (in the secret).
+  PORTAL_FRONTEND_URL: "https://customer.xoffice.cloud"
   # ChatFlow v2 integration (present in the live ConfigMap; kept here so an apply
   # does not delete it)
   CHATFLOW_V2_ENABLED: "true"

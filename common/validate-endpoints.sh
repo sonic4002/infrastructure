@@ -36,6 +36,7 @@ MAIN_HOST="chatflowpro.live"
 MQTT_HOST="mqtt.chatflowpro.live"
 XOFFICE_HOST="xoffice.cloud"
 XOFFICE_API_HOST="api.xoffice.cloud"
+XOFFICE_PORTAL_HOST="customer.xoffice.cloud"
 
 PASS=0
 FAIL=0
@@ -80,6 +81,7 @@ curl_opts() {
     opts="$opts --resolve ${API_HOST}:80:${ip}  --resolve ${MAIN_HOST}:80:${ip}  --resolve ${MQTT_HOST}:80:${ip}"
     opts="$opts --resolve ${XOFFICE_HOST}:443:${ip} --resolve ${XOFFICE_API_HOST}:443:${ip}"
     opts="$opts --resolve ${XOFFICE_HOST}:80:${ip}  --resolve ${XOFFICE_API_HOST}:80:${ip}"
+    opts="$opts --resolve ${XOFFICE_PORTAL_HOST}:443:${ip} --resolve ${XOFFICE_PORTAL_HOST}:80:${ip}"
   fi
   if $INSECURE; then opts="$opts -k"; fi
   echo "$opts"
@@ -334,12 +336,17 @@ run_xoffice_tests() {
 
   header "$label - xoffice Tests"
 
-  local xoffice_base xoffice_api_base
+  local xoffice_base xoffice_api_base xoffice_portal_base
   xoffice_base="$(scheme)://${XOFFICE_HOST}"
+  xoffice_portal_base="$(scheme)://${XOFFICE_PORTAL_HOST}"
   xoffice_api_base="$(scheme)://${XOFFICE_API_HOST}"
 
   # xoffice frontend (Next.js SPA) - expected 200
   check_http "GET xoffice.cloud/" "${xoffice_base}/" "$ip" "200"
+
+  # Customer portal (same frontend, portal mode by host) - the login page
+  # answers 200; any other path on this host redirects into the portal.
+  check_http "GET customer.xoffice.cloud/he/customer-portal/login" "${xoffice_portal_base}/he/customer-portal/login" "$ip" "200"
 
   # xoffice API health - expected 200
   check_http "GET api.xoffice.cloud/api/health/" "${xoffice_api_base}/api/health/" "$ip" "200"
