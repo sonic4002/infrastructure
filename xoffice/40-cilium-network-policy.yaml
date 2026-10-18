@@ -250,6 +250,42 @@ spec:
 
 ---
 ################################################################################
+# CiliumNetworkPolicy: Postgres ingress from the WhatsApp agent
+#
+# Allows:
+#   - wa-agent (namespace wa-agent) -> Postgres :5432
+#
+# Kept separate on purpose: Postgres is already deny-by-default (this file's
+# xoffice-postgres-ingress and the older postgres-network-policy select it), and
+# Cilium unions allow rules, so this adds exactly one client and leaves every
+# existing one untouched. The agent logs in as wa_agent_ro, a read-only role
+# (xoffice/db/wa-agent-readonly.sql).
+################################################################################
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: xoffice-postgres-ingress-wa-agent
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+    app.kubernetes.io/component: network-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: postgres
+
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: wa-agent
+            app: wa-agent
+      toPorts:
+        - ports:
+            - port: "5432"
+              protocol: TCP
+
+---
+################################################################################
 # CiliumNetworkPolicy: Redis ingress (xoffice)
 #
 # Allows:
