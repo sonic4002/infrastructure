@@ -2,7 +2,12 @@
 # =============================================================================
 # Platform Endpoint Validation Script
 # Tests all endpoints through the consolidated Cilium platform-gateway.
-# Cloudflare Flexible TLS: external HTTPS -> Cloudflare -> HTTP -> origin.
+# External HTTPS -> Cloudflare -> origin: Flexible (HTTP) for chatflowpro.live,
+# Full (HTTPS :443, common/02-tls-terminator.yaml) for xoffice.cloud.
+#
+# The customer staff clock checks (SPEC 15.7) expect clock.xoffice.cloud to be
+# live (DNS, the xoffice-clock listener and clock-route applied); until then
+# they fail by design. Lighthouse on the clock page is run by hand.
 #
 # Usage:
 #   ./validate-endpoints.sh [production] [--cilium-ip <ip>] [--tls] [--k8s-only]
@@ -37,6 +42,10 @@ MQTT_HOST="mqtt.chatflowpro.live"
 XOFFICE_HOST="xoffice.cloud"
 XOFFICE_API_HOST="api.xoffice.cloud"
 XOFFICE_PORTAL_HOST="customer.xoffice.cloud"
+XOFFICE_CLOCK_HOST="clock.xoffice.cloud"
+# A token that matches no member or kiosk; for the manifest it has the shape
+# the route accepts ([A-Za-z0-9_-]{16,256}), so the route itself answers.
+BOGUS_CLOCK_TOKEN="validate-endpoints-not-a-real-token"
 
 PASS=0
 FAIL=0
@@ -82,6 +91,7 @@ curl_opts() {
     opts="$opts --resolve ${XOFFICE_HOST}:443:${ip} --resolve ${XOFFICE_API_HOST}:443:${ip}"
     opts="$opts --resolve ${XOFFICE_HOST}:80:${ip}  --resolve ${XOFFICE_API_HOST}:80:${ip}"
     opts="$opts --resolve ${XOFFICE_PORTAL_HOST}:443:${ip} --resolve ${XOFFICE_PORTAL_HOST}:80:${ip}"
+    opts="$opts --resolve ${XOFFICE_CLOCK_HOST}:443:${ip} --resolve ${XOFFICE_CLOCK_HOST}:80:${ip}"
   fi
   if $INSECURE; then opts="$opts -k"; fi
   echo "$opts"
@@ -242,6 +252,120 @@ check_mqtt_ws() {
   fi
 }
 
+# One request, no redirects followed. Sets RESP_STATUS, RESP_HEADERS (header
+# lines, lower-cased), RESP_LOCATION and RESP_BODY. Extra curl arguments (for
+# example -H 'X-Clock-Token: ...') follow the method and URL. Arguments are
+# passed as an array, never through eval, so header values stay intact.
+fetch_response() {
+  local ip="$1" method="$2" url="$3"
+  shift 3
+  local hdr_file body_file
+  hdr_file=$(mktemp)
+  body_file=$(mktemp)
+  local args=(-s -o "$body_file" -D "$hdr_file" -w '%{http_code}' --connect-timeout 5 --max-time 10 -X "$method")
+  if [[ -n "$ip" ]]; then
+    local h
+    for h in "$XOFFICE_API_HOST" "$XOFFICE_PORTAL_HOST" "$XOFFICE_CLOCK_HOST"; do
+      args+=(--resolve "${h}:443:${ip}" --resolve "${h}:80:${ip}")
+    done
+  fi
+  if $INSECURE; then args+=(-k); fi
+  RESP_STATUS=$(curl "${args[@]}" "$@" "$url" 2>/dev/null) || RESP_STATUS="000"
+  RESP_HEADERS=$(tr -d '\r' < "$hdr_file" | tr '[:upper:]' '[:lower:]')
+  RESP_LOCATION=$(tr -d '\r' < "$hdr_file" | grep -i '^location:' | tail -n 1 | sed 's/^[Ll][Oo][Cc][Aa][Tt][Ii][Oo][Nn]:[[:space:]]*//' || true)
+  RESP_BODY=$(cat "$body_file")
+  rm -f "$hdr_file" "$body_file"
+}
+
+# resp_header_has <lower-case header name> <lower-case substring>
+resp_header_has() {
+  grep "^$1:" <<<"$RESP_HEADERS" | grep -qF -- "$2"
+}
+
+# The security headers of SPEC 12.5 on the clock pages and the manifest; prints
+# what is missing (empty when everything is there).
+missing_clock_security_headers() {
+  local missing=()
+  resp_header_has "content-security-policy" "frame-ancestors 'none'" || missing+=("content-security-policy frame-ancestors 'none'")
+  local perm
+  for perm in "geolocation=(self)" "publickey-credentials-create=(self)" "publickey-credentials-get=(self)" "camera=()" "microphone=()"; do
+    resp_header_has "permissions-policy" "$perm" || missing+=("permissions-policy $perm")
+  done
+  resp_header_has "referrer-policy" "no-referrer" || missing+=("referrer-policy no-referrer")
+  resp_header_has "x-content-type-options" "nosniff" || missing+=("x-content-type-options nosniff")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    local IFS=';'
+    echo "${missing[*]}"
+  fi
+}
+
+# A public attendance or reminder-action route with a bogus token: the uniform
+# 404, and (when asked) Cache-Control: no-store.
+check_public_not_found() {
+  local name="$1" ip="$2" method="$3" url="$4" want_no_store="$5"
+  shift 5
+  fetch_response "$ip" "$method" "$url" "$@"
+  if [[ "$RESP_STATUS" != "404" ]]; then
+    fail "$name" "(expected HTTP 404, got $RESP_STATUS)"
+  elif $want_no_store && ! resp_header_has "cache-control" "no-store"; then
+    fail "$name" "(HTTP 404 but Cache-Control is not no-store)"
+  elif $want_no_store; then
+    pass "$name (HTTP 404, Cache-Control: no-store)"
+  else
+    pass "$name (HTTP 404)"
+  fi
+}
+
+# A clock or kiosk page on the clock host: 200, noindex, security headers.
+check_clock_page() {
+  local name="$1" ip="$2" url="$3"
+  fetch_response "$ip" GET "$url"
+  if [[ "$RESP_STATUS" != "200" ]]; then
+    fail "$name" "(expected HTTP 200, got $RESP_STATUS)"
+    return
+  fi
+  if ! resp_header_has "x-robots-tag" "noindex" \
+     && ! grep -qiE '<meta[^>]*name="robots"[^>]*noindex' <<<"$RESP_BODY"; then
+    fail "$name" "(HTTP 200 but no noindex meta tag or X-Robots-Tag)"
+    return
+  fi
+  local missing
+  missing=$(missing_clock_security_headers)
+  if [[ -n "$missing" ]]; then
+    fail "$name" "(missing: $missing)"
+    return
+  fi
+  pass "$name (HTTP 200, noindex, security headers)"
+}
+
+# The clock's web manifest: 200 and the security headers.
+check_clock_manifest() {
+  local name="$1" ip="$2" url="$3"
+  fetch_response "$ip" GET "$url"
+  if [[ "$RESP_STATUS" != "200" ]]; then
+    fail "$name" "(expected HTTP 200, got $RESP_STATUS)"
+    return
+  fi
+  local missing
+  missing=$(missing_clock_security_headers)
+  if [[ -n "$missing" ]]; then
+    fail "$name" "(missing: $missing)"
+    return
+  fi
+  pass "$name (HTTP 200, security headers)"
+}
+
+# /c and /k on another host: a permanent 301 to the same path on the clock host.
+check_clock_moved() {
+  local name="$1" ip="$2" url="$3" expected_location="$4"
+  fetch_response "$ip" GET "$url"
+  if [[ "$RESP_STATUS" == "301" && "$RESP_LOCATION" == "$expected_location" ]]; then
+    pass "$name (HTTP 301 to $RESP_LOCATION)"
+  else
+    fail "$name" "(expected HTTP 301 to $expected_location, got $RESP_STATUS '${RESP_LOCATION}')"
+  fi
+}
+
 # ---------------------- Print header ----------------------
 header() {
   local label="$1"
@@ -353,6 +477,38 @@ run_xoffice_tests() {
 
   # xoffice API root (no auth) - expected 401 or 403, not 404
   check_http "GET api.xoffice.cloud/ (no auth -> 401|403)" "${xoffice_api_base}/" "$ip" "401 403"
+
+  run_xoffice_clock_tests "$ip"
+}
+
+# Customer staff clock (SPEC 15.7): public API routes, the clock host, the 301
+# from the portal host. Tokens travel only in headers, never in a URL.
+run_xoffice_clock_tests() {
+  local ip="$1"
+  local api_base portal_base clock_base clock_origin
+  api_base="$(scheme)://${XOFFICE_API_HOST}"
+  portal_base="$(scheme)://${XOFFICE_PORTAL_HOST}"
+  clock_base="$(scheme)://${XOFFICE_CLOCK_HOST}"
+  # The frontend always redirects to the production clock origin (https).
+  clock_origin="https://${XOFFICE_CLOCK_HOST}"
+
+  check_public_not_found "GET api.xoffice.cloud/attendance-clock/state (bogus token)" "$ip" \
+    GET "${api_base}/attendance-clock/state" true -H "X-Clock-Token: ${BOGUS_CLOCK_TOKEN}"
+  check_public_not_found "GET api.xoffice.cloud/attendance-kiosk/state (bogus token)" "$ip" \
+    GET "${api_base}/attendance-kiosk/state" true -H "X-Kiosk-Token: ${BOGUS_CLOCK_TOKEN}"
+  check_public_not_found "POST api.xoffice.cloud/reminder-actions (bogus token)" "$ip" \
+    POST "${api_base}/reminder-actions" false -H "X-Reminder-Action: ${BOGUS_CLOCK_TOKEN}" \
+    -H "Content-Type: application/json" --data '{"action":"snooze"}'
+
+  check_clock_moved "customer.xoffice.cloud/he/c/x -> 301 clock host" "$ip" \
+    "${portal_base}/he/c/x" "${clock_origin}/he/c/x"
+
+  check_clock_page "GET clock.xoffice.cloud/he/c/x" "$ip" "${clock_base}/he/c/x"
+  check_clock_page "GET clock.xoffice.cloud/he/k/x" "$ip" "${clock_base}/he/k/x"
+  check_clock_manifest "GET clock.xoffice.cloud/he/c/{token}/manifest.webmanifest" "$ip" \
+    "${clock_base}/he/c/${BOGUS_CLOCK_TOKEN}/manifest.webmanifest"
+
+  skip "Clock page Lighthouse (mobile, Slow 4G, 4x CPU: LCP <= 2.5 s, button interactive <= 3.5 s, JS <= 200 KB gz, no third-party request) - run by hand before release"
 }
 
 run_k8s_health_checks() {
@@ -386,7 +542,7 @@ run_k8s_health_checks() {
   done
 
   # Check all HTTPRoutes are accepted (xoffice namespace)
-  for route in api-route frontend-route; do
+  for route in api-route frontend-route clock-route; do
     local accepted
     accepted=$(kubectl get httproute "$route" -n xoffice \
       -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}' 2>/dev/null || echo "Unknown")
@@ -455,6 +611,7 @@ echo " Web:  $(scheme)://${MAIN_HOST}"
 echo " MQTT: $(scheme)://${MQTT_HOST}/mqtt"
 echo " xoffice: $(scheme)://${XOFFICE_HOST}"
 echo " xoffice API: $(scheme)://${XOFFICE_API_HOST}"
+echo " xoffice clock: $(scheme)://${XOFFICE_CLOCK_HOST}"
 if [[ -n "$CILIUM_IP" ]]; then echo " Cilium IP: $CILIUM_IP"; fi
 echo "============================================="
 

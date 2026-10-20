@@ -3,11 +3,16 @@
 # Consolidated Cilium Gateway - Single LB IP for all platform traffic
 #
 # Namespace: gateway (shared infrastructure)
-# TLS: Cloudflare Flexible mode (edge termination). All listeners are HTTP/80.
+# TLS: Cloudflare terminates at the edge. All listeners are HTTP/80.
+#   chatflowpro.live: Flexible (HTTP to origin).
+#   xoffice.cloud: Full (HTTPS to origin :443, self-signed certificate,
+#   unwrapped by common/02-tls-terminator.yaml); see the TLS note in
+#   xoffice/50-gateway-httproutes.yaml for the Full (Strict) gate.
 #
 # Domains:
 #   chatflow:  api.chatflowpro.live, chatflowpro.live, mqtt.chatflowpro.live
-#   xoffice:   xoffice.cloud, api.xoffice.cloud, customer.xoffice.cloud
+#   xoffice:   xoffice.cloud, api.xoffice.cloud, customer.xoffice.cloud,
+#              clock.xoffice.cloud
 #
 # HTTPRoutes live in their respective app namespaces (chatflow, xoffice).
 # Each listener uses a namespace selector to control which namespaces can
@@ -96,6 +101,21 @@ spec:
       protocol: HTTP
       port: 80
       hostname: "customer.xoffice.cloud"
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              app.kubernetes.io/name: xoffice
+
+    # The customer staff clock: the same xoffice frontend, which serves only
+    # the personal clock (/{locale}/c/*), the kiosk (/{locale}/k/*), the
+    # manifest and the legal pages on this host. Its own origin, because device
+    # keys, passkeys and push subscriptions are bound to it.
+    - name: xoffice-clock
+      protocol: HTTP
+      port: 80
+      hostname: "clock.xoffice.cloud"
       allowedRoutes:
         namespaces:
           from: Selector

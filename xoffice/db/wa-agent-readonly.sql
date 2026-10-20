@@ -162,7 +162,21 @@ CREATE INDEX IF NOT EXISTS wa_agent_ix_project_members_organization_id ON public
 DO $$
 DECLARE
   blocked  constant text[] := ARRAY['user_sessions', 'customer_portal_tokens', 'smb_credentials', 'leads_api_tokens',
-                                     'push_subscriptions', 'google_integrations', 'chatflow_connections'];
+                                     'push_subscriptions', 'google_integrations', 'chatflow_connections',
+                                     -- Reminders engine (migration 137) and customer staff attendance (138-140),
+                                     -- blocked whole: columns such as phone, in_lat, hourly_rate, public_key_jwk
+                                     -- or endpoint escape the sensitive pattern. Keep both blocked lists equal.
+                                     'reminder_deliveries',
+                                     'attendance_members', 'attendance_member_rates', 'attendance_kiosks',
+                                     'attendance_devices', 'attendance_device_challenges', 'attendance_records',
+                                     'attendance_settings', 'attendance_changes', 'attendance_channel_consents',
+                                     'attendance_sms_usage', 'attendance_link_sms_daily',
+                                     'attendance_schedules', 'attendance_schedule_versions', 'attendance_schedule_shifts',
+                                     'attendance_schedule_assignments', 'attendance_schedule_exceptions',
+                                     'attendance_expected_shifts', 'attendance_push_devices', 'attendance_watchers',
+                                     'attendance_imports', 'attendance_import_rows',
+                                     'attendance_periods', 'attendance_locked_figures', 'attendance_after_lock_changes',
+                                     'attendance_self_completions', 'attendance_self_completion_items'];
   -- Global lookup data with no organization in it: readable in full, no policy.
   open_tables constant text[] := ARRAY['permissions', 'alembic_version'];
   sensitive constant text := '(password|passwd|token|secret|api_?key|_hash$|^hashed_|encrypted|credential|private_key|bank|iban|id_number|otp)';
@@ -226,7 +240,21 @@ $$;
 DO $$
 DECLARE
   blocked  constant text[] := ARRAY['user_sessions', 'customer_portal_tokens', 'smb_credentials', 'leads_api_tokens',
-                                     'push_subscriptions', 'google_integrations', 'chatflow_connections'];
+                                     'push_subscriptions', 'google_integrations', 'chatflow_connections',
+                                     -- Reminders engine (migration 137) and customer staff attendance (138-140),
+                                     -- blocked whole: columns such as phone, in_lat, hourly_rate, public_key_jwk
+                                     -- or endpoint escape the sensitive pattern. Keep both blocked lists equal.
+                                     'reminder_deliveries',
+                                     'attendance_members', 'attendance_member_rates', 'attendance_kiosks',
+                                     'attendance_devices', 'attendance_device_challenges', 'attendance_records',
+                                     'attendance_settings', 'attendance_changes', 'attendance_channel_consents',
+                                     'attendance_sms_usage', 'attendance_link_sms_daily',
+                                     'attendance_schedules', 'attendance_schedule_versions', 'attendance_schedule_shifts',
+                                     'attendance_schedule_assignments', 'attendance_schedule_exceptions',
+                                     'attendance_expected_shifts', 'attendance_push_devices', 'attendance_watchers',
+                                     'attendance_imports', 'attendance_import_rows',
+                                     'attendance_periods', 'attendance_locked_figures', 'attendance_after_lock_changes',
+                                     'attendance_self_completions', 'attendance_self_completion_items'];
   sensitive constant text := '(password|passwd|token|secret|api_?key|_hash$|^hashed_|encrypted|credential|private_key|bank|iban|id_number|otp)';
   bad text;
 BEGIN
