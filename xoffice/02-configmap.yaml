@@ -21,7 +21,9 @@ data:
   # origins. Gate: the host must be live (DNS, Full (Strict), Origin CA) before
   # the first real link, because device keys, passkeys and push subscriptions
   # are bound to the origin.
-  CLOCK_FRONTEND_URL: "https://clock.xoffice.cloud"
+  # Not set at the first release (2026-10-24): clock and kiosk links are served
+  # from PORTAL_FRONTEND_URL until clock.xoffice.cloud passes the gate above.
+  # CLOCK_FRONTEND_URL: "https://clock.xoffice.cloud"
   # Reminders engine source modes (source:mode pairs; live | dry_run | off).
   # attendance:dry_run for the first production week: deliveries are written to
   # the alert log but nothing is sent. Then remove this line (live). An unknown
