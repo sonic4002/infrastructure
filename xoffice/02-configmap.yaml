@@ -15,6 +15,18 @@ data:
   # arriving from it (and a portal token arriving from FRONTEND_URL).
   # It must also be listed in CORS_ORIGINS (in the secret).
   PORTAL_FRONTEND_URL: "https://customer.xoffice.cloud"
+  # The customer staff clock's origin (personal clock /{locale}/c/{token} and
+  # kiosk /{locale}/k/{token}). The backend builds every clock and kiosk link on
+  # it, accepts push-device registrations only from it, and adds it to the CORS
+  # origins. Gate: the host must be live (DNS, Full (Strict), Origin CA) before
+  # the first real link, because device keys, passkeys and push subscriptions
+  # are bound to the origin.
+  CLOCK_FRONTEND_URL: "https://clock.xoffice.cloud"
+  # Reminders engine source modes (source:mode pairs; live | dry_run | off).
+  # attendance:dry_run for the first production week: deliveries are written to
+  # the alert log but nothing is sent. Then remove this line (live). An unknown
+  # source or mode fails the reminder worker's start-up.
+  REMINDER_SOURCE_MODES: "attendance:dry_run"
   # ChatFlow v2 integration (present in the live ConfigMap; kept here so an apply
   # does not delete it)
   CHATFLOW_V2_ENABLED: "true"
@@ -30,5 +42,10 @@ data:
   # cleanly disabled (see push_subscriptions.py and push_subscription_service.py).
   # Shipping the placeholder string would satisfy those guards and hand the browser an
   # invalid key, so uncomment only together with VAPID_PRIVATE_KEY in xoffice-secrets.
+  # Human gate (owner only, before the first real clock link): generate a fresh
+  # P-256 key pair (do not reuse the old local entry), private key into
+  # infrastructure/secrets/xoffice/, public key here, then ./scripts/sync-to-ice.sh.
+  # Until then the clock page hides its push toggle and alert plans are skipped
+  # as unavailable; the same keys also turn on Customer portal push.
   # VAPID_PUBLIC_KEY: "<generated-public-key>"
   # VAPID_CONTACT_EMAIL: "mailto:admin@xoffice.cloud"

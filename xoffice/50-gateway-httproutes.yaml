@@ -5,8 +5,17 @@
 #   matchLabels: { app.kubernetes.io/name: xoffice }
 # which matches the xoffice namespace label (00-namespace.yaml).
 #
-# CORS: Handled by Django middleware.
-# TLS: Cloudflare Flexible mode (edge termination, origin HTTP).
+# CORS: Handled by the FastAPI backend (CORS_ORIGINS plus the portal and
+# clock origins).
+# TLS: Cloudflare terminates at the edge and connects to the origin in Full
+# mode today: HTTPS to port 443 with a self-signed certificate, which
+# common/02-tls-terminator.yaml unwraps to the gateway's HTTP listeners.
+# Full does not verify the origin, and 443 is reachable directly.
+# Gate before the first real customer staff clock link (clock.xoffice.cloud):
+# install a Cloudflare Origin CA certificate, switch the zone to Full (Strict),
+# and turn on Authenticated Origin Pulls (or firewall 443 to Cloudflare's
+# ranges). Only then is CF-Connecting-IP trustworthy (evidence, never
+# authorisation). Do not move the zone to Flexible.
 #
 # Replaces: k8s/30-ingress.yaml (nginx)
 # Obsoletes: k8s/99-chatflow-ingress.yaml (cross-ns nginx hack)
@@ -70,6 +79,52 @@ spec:
       sectionName: xoffice-customer-portal
   hostnames:
     - customer.xoffice.cloud
+  rules:
+    # WebSocket connections get unlimited timeout
+    - matches:
+        - headers:
+            - name: Upgrade
+              value: websocket
+      backendRefs:
+        - name: xoffice-frontend-service
+          port: 80
+      timeouts:
+        request: "0s"
+        backendRequest: "0s"
+    # Regular HTTP requests
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: xoffice-frontend-service
+          port: 80
+      timeouts:
+        request: 30s
+        backendRequest: 30s
+---
+# Customer staff clock Route -- clock.xoffice.cloud
+#
+# A copy of customer-portal-route. Same backend service: the frontend decides
+# by the Host header that it is the clock host and serves only the personal
+# clock (/{locale}/c/*), the kiosk (/{locale}/k/*), the manifest and the legal
+# pages there; anything else is not found. Once this host is live, /c and /k on
+# the staff and portal hosts answer 301 here. A separate route, so the clock
+# can be detached at the gateway on its own. The pages call api.xoffice.cloud.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: clock-route
+  namespace: xoffice
+  labels:
+    app.kubernetes.io/name: xoffice
+spec:
+  parentRefs:
+    - name: platform-gateway
+      namespace: gateway
+      sectionName: xoffice-clock
+  hostnames:
+    - clock.xoffice.cloud
   rules:
     # WebSocket connections get unlimited timeout
     - matches:

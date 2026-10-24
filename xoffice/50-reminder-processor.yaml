@@ -34,16 +34,26 @@ spec:
                 name: xoffice-secrets
             - configMapRef:
                 name: xoffice-config
+          # Two loops in one pod: the legacy loop (user reminders, pollers) every
+          # WORKER_POLL_INTERVAL_SECONDS, and the reminders engine loop (system
+          # reminders and jobs, e.g. customer staff attendance) every
+          # REMINDER_ENGINE_POLL_SECONDS. /tmp/heartbeat is touched only while both
+          # loops have completed a pass in the last 90 s, so the liveness probe
+          # below restarts the pod when either one hangs.
+          # replicas 1 + Recreate stay: the legacy loop is not claim-safe.
           env:
             - name: WORKER_POLL_INTERVAL_SECONDS
               value: "30"
+            - name: REMINDER_ENGINE_POLL_SECONDS
+              value: "15"
+          # Raised for the engine loop (up to 20 concurrent deliveries and 4 jobs).
           resources:
             requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
               memory: "256Mi"
               cpu: "200m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
           livenessProbe:
             exec:
               command:
