@@ -29,6 +29,22 @@ data:
   # the alert log but nothing is sent. Then remove this line (live). An unknown
   # source or mode fails the reminder worker's start-up.
   REMINDER_SOURCE_MODES: "attendance:dry_run"
+  # SUMIT billing (xoffice specs/billing). SUMIT_COMPANY_ID and SUMIT_API_KEY are
+  # in xoffice-secrets (envFrom). The four fixed SUMIT payment pages are public
+  # URLs, not secrets. Empty on purpose: a product whose page is empty cannot be
+  # bought (POST /billing/checkouts -> 503 billing_unavailable), while the trial,
+  # the lock and the guard still apply. The owner fills in the PRODUCTION page
+  # URLs here only after the sandbox run passes end to end; the MONTHLY and
+  # PORTAL_USER pages must be standing orders (recurring products) in SUMIT.
+  # Each page's success URL in SUMIT is https://xoffice.cloud/he/billing/return.
+  # Production pages live in this ConfigMap, not in the Secret: this ConfigMap
+  # is listed after the Secret in envFrom, so its (empty) values would win.
+  SUMIT_PAGE_MONTHLY: ""
+  SUMIT_PAGE_HALF_YEAR: ""
+  SUMIT_PAGE_YEARLY: ""
+  SUMIT_PAGE_PORTAL_USER: ""
+  # Who is emailed about unmatched payments, failed panel charges and open refunds.
+  BILLING_ALERT_EMAILS: "omrihaviv@gmail.com,kerenaxelrod@gmail.com"
   # ChatFlow v2 integration (present in the live ConfigMap; kept here so an apply
   # does not delete it)
   CHATFLOW_V2_ENABLED: "true"

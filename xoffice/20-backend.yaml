@@ -26,6 +26,9 @@ spec:
           ports:
             - containerPort: 8000
           envFrom:
+            # xoffice-secrets carries SUMIT_COMPANY_ID and SUMIT_API_KEY (billing),
+            # like every other credential. Until the owner adds them, checkouts
+            # return 503 billing_unavailable and the reconciler skips SUMIT.
             - secretRef:
                 name: xoffice-secrets
             - configMapRef:
