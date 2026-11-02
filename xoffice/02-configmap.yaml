@@ -21,9 +21,10 @@ data:
   # origins. Gate: the host must be live (DNS, Full (Strict), Origin CA) before
   # the first real link, because device keys, passkeys and push subscriptions
   # are bound to the origin.
-  # Not set at the first release (2026-10-24): clock and kiosk links are served
-  # from PORTAL_FRONTEND_URL until clock.xoffice.cloud passes the gate above.
-  # CLOCK_FRONTEND_URL: "https://clock.xoffice.cloud"
+  # Set 2026-11-02 (DNS added; the Origin CA / Full (Strict) gate in
+  # common/02-tls-terminator.yaml is still open). Links sent before then stay on
+  # PORTAL_FRONTEND_URL, where push is not offered.
+  CLOCK_FRONTEND_URL: "https://clock.xoffice.cloud"
   # Reminders engine source modes (source:mode pairs; live | dry_run | off).
   # Unset = every source live. attendance ran as dry_run from the release
   # (2026-10-24) to 2026-11-02, then went live. Level 0 of the rollback is
