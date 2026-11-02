@@ -25,10 +25,10 @@ data:
   # from PORTAL_FRONTEND_URL until clock.xoffice.cloud passes the gate above.
   # CLOCK_FRONTEND_URL: "https://clock.xoffice.cloud"
   # Reminders engine source modes (source:mode pairs; live | dry_run | off).
-  # attendance:dry_run for the first production week: deliveries are written to
-  # the alert log but nothing is sent. Then remove this line (live). An unknown
-  # source or mode fails the reminder worker's start-up.
-  REMINDER_SOURCE_MODES: "attendance:dry_run"
+  # Unset = every source live. attendance ran as dry_run from the release
+  # (2026-10-24) to 2026-11-02, then went live. Level 0 of the rollback is
+  # REMINDER_SOURCE_MODES: "attendance:off". An unknown source or mode fails the
+  # reminder worker's start-up.
   # SUMIT billing (xoffice specs/billing). SUMIT_COMPANY_ID and SUMIT_API_KEY are
   # in xoffice-secrets (envFrom). The four fixed SUMIT payment pages are public
   # URLs, not secrets: Keren's production business. A page left empty, or missing
@@ -55,15 +55,10 @@ data:
   MQTT_ENABLED: "false"
   MQTT_BROKER_URL: "tcp://emqx-service.chatflow.svc.cluster.local:1883"
   MQTT_CLIENT_ID: "xoffice-backend"
-  # Web Push VAPID (public key is not sensitive).
-  # Left unset on purpose: an empty vapid_public_key is the flag that keeps web push
-  # cleanly disabled (see push_subscriptions.py and push_subscription_service.py).
-  # Shipping the placeholder string would satisfy those guards and hand the browser an
-  # invalid key, so uncomment only together with VAPID_PRIVATE_KEY in xoffice-secrets.
-  # Human gate (owner only, before the first real clock link): generate a fresh
-  # P-256 key pair (do not reuse the old local entry), private key into
-  # infrastructure/secrets/xoffice/, public key here, then ./scripts/sync-to-ice.sh.
-  # Until then the clock page hides its push toggle and alert plans are skipped
-  # as unavailable; the same keys also turn on Customer portal push.
-  # VAPID_PUBLIC_KEY: "<generated-public-key>"
-  # VAPID_CONTACT_EMAIL: "mailto:admin@xoffice.cloud"
+  # Web Push VAPID (public key is not sensitive). Generated 2026-11-02; the private
+  # key is VAPID_PRIVATE_KEY in xoffice-secrets (infrastructure/secrets/xoffice/).
+  # Replace both together: a public key without its private key hands the browser
+  # a key the server cannot sign with. The same keys serve the clock and Customer
+  # portal push.
+  VAPID_PUBLIC_KEY: "BMMvqHvMU6P4GCFBuE65Qfq0_7QdwSM617jvzxKaj-g3hJXsxJXs7Q3B2mmHK_N3kcUKpDBhsijXn6bOu8PMAkY"
+  VAPID_CONTACT_EMAIL: "mailto:admin@xoffice.cloud"
