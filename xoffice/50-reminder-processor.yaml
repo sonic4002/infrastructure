@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: reminder-worker
-          image: sonic4002/digital_solutions:xoffice-backend-v288
+          image: sonic4002/digital_solutions:xoffice-backend-v289
           imagePullPolicy: Always
           command:
             - python
