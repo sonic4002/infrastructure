@@ -63,3 +63,20 @@ data:
   # portal push.
   VAPID_PUBLIC_KEY: "BMMvqHvMU6P4GCFBuE65Qfq0_7QdwSM617jvzxKaj-g3hJXsxJXs7Q3B2mmHK_N3kcUKpDBhsijXn6bOu8PMAkY"
   VAPID_CONTACT_EMAIL: "mailto:admin@xoffice.cloud"
+  # ChatGPT connector (plugin). The public origin ChatGPT reaches: OAuth issuer,
+  # metadata URLs and token audience (<URL>/mcp). CONNECTOR_JWT_SECRET is in
+  # xoffice-secrets. With either empty the connector answers 503.
+  CONNECTOR_PUBLIC_URL: "https://api.xoffice.cloud"
+  # Proxies believed about X-Forwarded-For for the sign-in rate limit: the
+  # Cilium node ingress (Envoy, the backend's TCP peer; ciliumnode
+  # spec.ingress.ipv4) and loopback, the hop the hostNetwork tls-terminator
+  # (nginx stream) appears as to Envoy. Cloudflare appends the real client last.
+  # If the node is rebuilt, re-read the ingress IP. Never widen to 10.0.0.0/8.
+  CONNECTOR_TRUSTED_PROXIES: "10.0.0.239/32,127.0.0.1/32"
+  # OpenAI plugin portal: domain-verification token served at
+  # https://api.xoffice.cloud/.well-known/openai-apps-challenge (empty = 404),
+  # and exact extra OAuth client IDs / redirect URIs (comma-separated) if the
+  # portal's own connection uses shapes other than chatgpt.com's.
+  CONNECTOR_OPENAI_CHALLENGE: ""
+  CONNECTOR_EXTRA_CLIENT_IDS: ""
+  CONNECTOR_EXTRA_REDIRECT_URIS: ""
