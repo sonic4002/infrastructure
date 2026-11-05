@@ -77,6 +77,6 @@ data:
   # https://api.xoffice.cloud/.well-known/openai-apps-challenge (empty = 404),
   # and exact extra OAuth client IDs / redirect URIs (comma-separated) if the
   # portal's own connection uses shapes other than chatgpt.com's.
-  CONNECTOR_OPENAI_CHALLENGE: ""
+  CONNECTOR_OPENAI_CHALLENGE: "7m1A2jY85zhpoT5DOAmmpoHghBiSwsawMpWi31b6fDs"
   CONNECTOR_EXTRA_CLIENT_IDS: ""
   CONNECTOR_EXTRA_REDIRECT_URIS: ""
