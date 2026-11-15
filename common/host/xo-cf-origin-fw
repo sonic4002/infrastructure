@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# =============================================================================
+# xo-cf-origin-fw -- allow TCP 443 and 80 on this node only from Cloudflare.
+#
+# Installed on the node as /usr/local/sbin/xo-cf-origin-fw (source of truth:
+# infrastructure/common/host/). Port 443 is the hostNetwork tls-terminator
+# (common/02-tls-terminator.yaml) for *.xoffice.cloud; port 80 is cilium-envoy
+# (platform-gateway), which Cloudflare uses for chatflowpro.live (SSL Flexible).
+# Every hostname on this node is Cloudflare-proxied. Nothing else is touched:
+# 22, 6443, 10250 and every other port keep their current behaviour.
+# Ports come from PORTS in /etc/default/xo-cf-origin-fw (default "443 80").
+#
+# Usage:
+#   xo-cf-origin-fw apply      fetch Cloudflare's IPv4 ranges, (re)build the rule
+#   xo-cf-origin-fw rollback   remove the rule entirely (443 open to the world)
+#   xo-cf-origin-fw status     show the INPUT jump and the chain
+#
+# apply is atomic from the client's view: the new chain is built beside the old
+# one, the INPUT jump is swapped, then the old chain is removed. If the fetch
+# fails or returns an implausible list, the current rule is kept unchanged.
+# IPv6: mirrored with ip6tables and Cloudflare's v6 ranges only when the node
+# has a global IPv6 address (none today, so the v6 part is a no-op).
+# =============================================================================
+set -euo pipefail
+
+CHAIN_PREFIX="XO-CF443"   # name kept from the 443-only version; the chain serves every port in PORTS
+PORTS="443 80"
+[[ -r /etc/default/xo-cf-origin-fw ]] && . /etc/default/xo-cf-origin-fw
+LIST_URL="https://api.cloudflare.com/client/v4/ips"
+MIN_RANGES=10
+CACHE="/var/lib/xo-cf-origin-fw/ipv4.txt"
+
+log() { logger -t xo-cf-origin-fw -- "$*"; echo "$*"; }
+
+current_chain() {
+  iptables -S INPUT | awk '/xo-cf-origin-fw/ && /-j XO-CF443-/ {print $NF; exit}'
+}
+
+# Remove every INPUT jump to chain $1, whatever port it was for.
+remove_jumps() {
+  local c=$1 line
+  while line=$(iptables -S INPUT | grep -m1 -- "-j $c\$"); do
+    # shellcheck disable=SC2086
+    iptables ${line/-A INPUT/-D INPUT}
+  done
+}
+
+fetch_ranges() {
+  local json
+  json=$(curl -fsS --max-time 20 "$LIST_URL") || return 1
+  python3 -c '
+import json, sys, ipaddress
+d = json.loads(sys.stdin.read())
+if not d.get("success"): sys.exit(1)
+fam = sys.argv[1]
+key, cls = ("ipv4_cidrs", ipaddress.IPv4Network) if fam == "4" else ("ipv6_cidrs", ipaddress.IPv6Network)
+for c in d["result"][key]:
+    print(cls(c))
+' "$1" <<<"$json"
+}
+
+has_global_v6() { ip -6 addr show scope global 2>/dev/null | grep -q inet6; }
+
+# IPv6 mirror. A no-op while the node has no global IPv6 address (true today);
+# if one ever appears, the same ports get the same Cloudflare-only rule on v6.
+apply_v6() {
+  local ranges n old new p cache6="${CACHE%.txt}-v6.txt"
+  if ! has_global_v6; then
+    rollback_v6 quiet
+    log "ipv6: no global address, nothing to restrict"
+    return 0
+  fi
+  if ranges=$(fetch_ranges 6); then n=$(grep -c . <<<"$ranges" || true); else n=0; fi
+  if (( n < 3 )); then
+    if [[ -s "$cache6" ]]; then ranges=$(cat "$cache6"); n=$(grep -c . <<<"$ranges")
+    else log "ipv6: fetch failed and no cache; v6 left unchanged"; return 1; fi
+  else
+    printf '%s\n' "$ranges" > "$cache6"
+  fi
+  old=$(ip6tables -S INPUT | awk '/xo-cf-origin-fw/ && /-j XO-CF443-/ {print $NF; exit}' || true)
+  if [[ "$old" == "${CHAIN_PREFIX}-A" ]]; then new="${CHAIN_PREFIX}-B"; else new="${CHAIN_PREFIX}-A"; fi
+  ip6tables -N "$new" 2>/dev/null || ip6tables -F "$new"
+  ip6tables -A "$new" -i lo -j ACCEPT
+  while read -r cidr; do [[ -n "$cidr" ]] && ip6tables -A "$new" -s "$cidr" -j ACCEPT; done <<<"$ranges"
+  ip6tables -A "$new" -j DROP
+  for p in $PORTS; do
+    ip6tables -I INPUT 1 -p tcp --dport "$p" -m comment --comment "xo-cf-origin-fw" -j "$new"
+  done
+  if [[ -n "$old" ]]; then
+    remove_jumps6 "$old"; ip6tables -F "$old" 2>/dev/null || true; ip6tables -X "$old" 2>/dev/null || true
+  fi
+  log "ipv6: ports $PORTS allowed from $n Cloudflare IPv6 ranges (chain $new)"
+}
+
+remove_jumps6() {
+  local c=$1 line
+  while line=$(ip6tables -S INPUT | grep -m1 -- "-j $c\$"); do
+    # shellcheck disable=SC2086
+    ip6tables ${line/-A INPUT/-D INPUT}
+  done
+}
+
+rollback_v6() {
+  local c
+  for c in "${CHAIN_PREFIX}-A" "${CHAIN_PREFIX}-B"; do
+    remove_jumps6 "$c"
+    ip6tables -F "$c" 2>/dev/null || true
+    ip6tables -X "$c" 2>/dev/null || true
+  done
+  [[ "${1:-}" == quiet ]] || log "ipv6: rolled back"
+}
+
+apply() {
+  local ranges n old new
+  if ranges=$(fetch_ranges 4); then
+    n=$(grep -c . <<<"$ranges" || true)
+  else
+    n=0
+  fi
+  if (( n < MIN_RANGES )); then
+    if [[ -s "$CACHE" ]]; then
+      log "fetch failed or returned $n ranges; using cached list $CACHE"
+      ranges=$(cat "$CACHE"); n=$(grep -c . <<<"$ranges")
+    else
+      log "fetch failed or returned $n ranges and no cache; leaving firewall unchanged"
+      exit 1
+    fi
+  else
+    mkdir -p "$(dirname "$CACHE")"
+    printf '%s\n' "$ranges" > "$CACHE"
+  fi
+
+  old=$(current_chain || true)
+  if [[ "$old" == "${CHAIN_PREFIX}-A" ]]; then new="${CHAIN_PREFIX}-B"; else new="${CHAIN_PREFIX}-A"; fi
+
+  iptables -N "$new" 2>/dev/null || iptables -F "$new"
+  # Loopback first: the tls-terminator proxies decrypted 443 traffic to envoy at
+  # 127.0.0.1:80, so port 80 must stay open on lo or every xoffice host breaks.
+  iptables -A "$new" -i lo -j ACCEPT
+  while read -r cidr; do
+    [[ -n "$cidr" ]] && iptables -A "$new" -s "$cidr" -j ACCEPT
+  done <<<"$ranges"
+  iptables -A "$new" -j DROP
+
+  # New jumps first (top of INPUT), then drop the old ones: no window without a rule.
+  local p
+  for p in $PORTS; do
+    iptables -I INPUT 1 -p tcp --dport "$p" -m comment --comment "xo-cf-origin-fw" -j "$new"
+  done
+  if [[ -n "$old" ]]; then
+    remove_jumps "$old"
+    iptables -F "$old" 2>/dev/null || true
+    iptables -X "$old" 2>/dev/null || true
+  fi
+  log "applied: ports $PORTS allowed from $n Cloudflare IPv4 ranges (chain $new)"
+  apply_v6 || log "WARNING: ipv6 rule not applied; v6 traffic on $PORTS is unrestricted"
+}
+
+rollback() {
+  local c
+  for c in "${CHAIN_PREFIX}-A" "${CHAIN_PREFIX}-B"; do
+    remove_jumps "$c"
+    iptables -F "$c" 2>/dev/null || true
+    iptables -X "$c" 2>/dev/null || true
+  done
+  rollback_v6 quiet
+  log "rolled back: ports open to all sources (IPv4 and IPv6)"
+}
+
+status() {
+  iptables -S INPUT | grep -E "XO-CF443" || echo "no xo-cf-origin-fw rule in INPUT"
+  local c; c=$(current_chain || true)
+  [[ -n "$c" ]] && iptables -L "$c" -n -v --line-numbers
+  ip6tables -S INPUT | grep -E "XO-CF443" || echo "ipv6: no rule (no global address)"
+  return 0
+}
+
+case "${1:-}" in
+  apply) apply ;;
+  rollback) rollback ;;
+  status) status ;;
+  *) echo "usage: $0 apply|rollback|status" >&2; exit 2 ;;
+esac

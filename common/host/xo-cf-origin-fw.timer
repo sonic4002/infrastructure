@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh the Cloudflare-only 443 rule daily (and shortly after boot)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1d
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
