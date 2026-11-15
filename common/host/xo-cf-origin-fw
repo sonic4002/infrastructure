@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-# xo-cf-origin-fw -- allow TCP 443 on this node only from Cloudflare.
+# xo-cf-origin-fw -- allow TCP 443 and 80 on this node only from Cloudflare.
 #
 # Installed on the node as /usr/local/sbin/xo-cf-origin-fw (source of truth:
 # infrastructure/common/host/). Port 443 is the hostNetwork tls-terminator
-# (common/02-tls-terminator.yaml) serving every *.xoffice.cloud host, all of
-# which are Cloudflare-proxied. Nothing else is touched: 22, 6443, 80 and every
-# other port keep their current (open) behaviour.
+# (common/02-tls-terminator.yaml) for *.xoffice.cloud; port 80 is cilium-envoy
+# (platform-gateway), which Cloudflare uses for chatflowpro.live (SSL Flexible).
+# Every hostname on this node is Cloudflare-proxied. Nothing else is touched:
+# 22, 6443, 10250 and every other port keep their current behaviour.
+# Ports come from PORTS in /etc/default/xo-cf-origin-fw (default "443 80").
 #
 # Usage:
 #   xo-cf-origin-fw apply      fetch Cloudflare's IPv4 ranges, (re)build the rule
@@ -16,11 +18,14 @@
 # apply is atomic from the client's view: the new chain is built beside the old
 # one, the INPUT jump is swapped, then the old chain is removed. If the fetch
 # fails or returns an implausible list, the current rule is kept unchanged.
-# IPv4 only: the node has no global IPv6 address.
+# IPv4 only: the node has no global IPv6 address. apply warns if it ever gets
+# one, because v6 traffic on these ports would then bypass the rule.
 # =============================================================================
 set -euo pipefail
 
-CHAIN_PREFIX="XO-CF443"
+CHAIN_PREFIX="XO-CF443"   # name kept from the 443-only version; the chain serves every port in PORTS
+PORTS="443 80"
+[[ -r /etc/default/xo-cf-origin-fw ]] && . /etc/default/xo-cf-origin-fw
 LIST_URL="https://api.cloudflare.com/client/v4/ips"
 MIN_RANGES=10
 CACHE="/var/lib/xo-cf-origin-fw/ipv4.txt"
@@ -28,7 +33,16 @@ CACHE="/var/lib/xo-cf-origin-fw/ipv4.txt"
 log() { logger -t xo-cf-origin-fw -- "$*"; echo "$*"; }
 
 current_chain() {
-  iptables -S INPUT | awk '/--dport 443/ && /-j XO-CF443/ {print $NF; exit}'
+  iptables -S INPUT | awk '/xo-cf-origin-fw/ && /-j XO-CF443-/ {print $NF; exit}'
+}
+
+# Remove every INPUT jump to chain $1, whatever port it was for.
+remove_jumps() {
+  local c=$1 line
+  while line=$(iptables -S INPUT | grep -m1 -- "-j $c\$"); do
+    # shellcheck disable=SC2086
+    iptables ${line/-A INPUT/-D INPUT}
+  done
 }
 
 fetch_ranges() {
@@ -67,34 +81,42 @@ apply() {
   if [[ "$old" == "${CHAIN_PREFIX}-A" ]]; then new="${CHAIN_PREFIX}-B"; else new="${CHAIN_PREFIX}-A"; fi
 
   iptables -N "$new" 2>/dev/null || iptables -F "$new"
+  # Loopback first: the tls-terminator proxies decrypted 443 traffic to envoy at
+  # 127.0.0.1:80, so port 80 must stay open on lo or every xoffice host breaks.
+  iptables -A "$new" -i lo -j ACCEPT
   while read -r cidr; do
     [[ -n "$cidr" ]] && iptables -A "$new" -s "$cidr" -j ACCEPT
   done <<<"$ranges"
   iptables -A "$new" -j DROP
 
-  # New jump first (position 1), then drop the old one: no window without a rule.
-  iptables -I INPUT 1 -p tcp --dport 443 -m comment --comment "xo-cf-origin-fw" -j "$new"
+  # New jumps first (top of INPUT), then drop the old ones: no window without a rule.
+  local p
+  for p in $PORTS; do
+    iptables -I INPUT 1 -p tcp --dport "$p" -m comment --comment "xo-cf-origin-fw" -j "$new"
+  done
   if [[ -n "$old" ]]; then
-    iptables -D INPUT -p tcp --dport 443 -m comment --comment "xo-cf-origin-fw" -j "$old" 2>/dev/null \
-      || iptables -D INPUT -p tcp --dport 443 -j "$old" 2>/dev/null || true
+    remove_jumps "$old"
     iptables -F "$old" 2>/dev/null || true
     iptables -X "$old" 2>/dev/null || true
   fi
-  log "applied: 443 allowed from $n Cloudflare IPv4 ranges (chain $new)"
+  if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+    log "WARNING: node has a global IPv6 address; ports $PORTS are NOT restricted on IPv6"
+  fi
+  log "applied: ports $PORTS allowed from $n Cloudflare IPv4 ranges (chain $new)"
 }
 
 rollback() {
   local c
   for c in "${CHAIN_PREFIX}-A" "${CHAIN_PREFIX}-B"; do
-    while iptables -D INPUT -p tcp --dport 443 -m comment --comment "xo-cf-origin-fw" -j "$c" 2>/dev/null; do :; done
+    remove_jumps "$c"
     iptables -F "$c" 2>/dev/null || true
     iptables -X "$c" 2>/dev/null || true
   done
-  log "rolled back: 443 open to all sources"
+  log "rolled back: ports open to all sources"
 }
 
 status() {
-  iptables -S INPUT | grep -E "XO-CF443" || echo "no 443 rule in INPUT"
+  iptables -S INPUT | grep -E "XO-CF443" || echo "no xo-cf-origin-fw rule in INPUT"
   local c; c=$(current_chain || true)
   [[ -n "$c" ]] && iptables -L "$c" -n -v --line-numbers
   return 0
