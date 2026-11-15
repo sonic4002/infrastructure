@@ -31,18 +31,21 @@ data:
   # REMINDER_SOURCE_MODES: "attendance:off". An unknown source or mode fails the
   # reminder worker's start-up.
   # SUMIT billing (xoffice specs/billing). SUMIT_COMPANY_ID and SUMIT_API_KEY are
-  # in xoffice-secrets (envFrom). The four fixed SUMIT payment pages are public
+  # in xoffice-secrets (envFrom). The two fixed SUMIT payment pages are public
   # URLs, not secrets: Keren's production business. A page left empty, or missing
   # API keys, makes POST /billing/checkouts return 503 billing_unavailable, while
-  # the trial, the lock and the guard still apply. The MONTHLY and PORTAL_USER
-  # pages must sell a recurring product (standing order) in SUMIT; the link's last
-  # segment is the product, so after changing a page's product copy its new link.
+  # the trial, the lock and the guard still apply. Both pages must sell a
+  # recurring product (standing order) in SUMIT; the link's last segment is the
+  # product, so after changing a page's product copy its new link.
   # Each page's success URL in SUMIT is https://xoffice.cloud/he/billing/return.
   # Production pages live in this ConfigMap, not in the Secret: this ConfigMap
   # is listed after the Secret in envFrom, so its values would win.
-  SUMIT_PAGE_MONTHLY: "https://pay.sumit.co.il/14qzgkp/15sb0v2/15sb0v3/payment/"
-  SUMIT_PAGE_HALF_YEAR: "https://pay.sumit.co.il/14qzgkp/15s6fxc/15s6fxd/payment/"
-  SUMIT_PAGE_YEARLY: "https://pay.sumit.co.il/14qzgkp/15s7ltu/15s7ltv/payment/"
+  # PER_USER: 99 + VAT = 117 per user per month, the page is sold with
+  # &quantity=<users>; quantity selection must be ON for that page in SUMIT, or
+  # an office of 2+ users is charged 117 once and the payment is refused
+  # (standing order cancelled, refund by hand). PORTAL_USER: 49 incl. VAT.
+  # The half-year and yearly pages (15s6fxc, 15s7ltu) were retired 2026-11-15.
+  SUMIT_PAGE_PER_USER: "https://pay.sumit.co.il/14qzgkp/15sb0v2/15sb0v3/payment/"
   SUMIT_PAGE_PORTAL_USER: "https://pay.sumit.co.il/14qzgkp/15sjld3/15sjld4/payment/"
   # Who is emailed about unmatched payments, failed panel charges and open refunds.
   BILLING_ALERT_EMAILS: "omrihaviv@gmail.com,kerenaxelrod@gmail.com"
@@ -80,3 +83,7 @@ data:
   CONNECTOR_OPENAI_CHALLENGE: "7m1A2jY85zhpoT5DOAmmpoHghBiSwsawMpWi31b6fDs"
   CONNECTOR_EXTRA_CLIENT_IDS: ""
   CONNECTOR_EXTRA_REDIRECT_URIS: ""
+  # Employee consent: "false" = prompt only (dialog offers "Later", nothing is
+  # refused); "true" = staff without consent on record are refused the
+  # organisation's data until they agree.
+  EMPLOYEE_CONSENT_GATE_ENABLED: "false"
