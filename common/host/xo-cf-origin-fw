@@ -18,8 +18,8 @@
 # apply is atomic from the client's view: the new chain is built beside the old
 # one, the INPUT jump is swapped, then the old chain is removed. If the fetch
 # fails or returns an implausible list, the current rule is kept unchanged.
-# IPv4 only: the node has no global IPv6 address. apply warns if it ever gets
-# one, because v6 traffic on these ports would then bypass the rule.
+# IPv6: mirrored with ip6tables and Cloudflare's v6 ranges only when the node
+# has a global IPv6 address (none today, so the v6 part is a no-op).
 # =============================================================================
 set -euo pipefail
 
@@ -52,14 +52,67 @@ fetch_ranges() {
 import json, sys, ipaddress
 d = json.loads(sys.stdin.read())
 if not d.get("success"): sys.exit(1)
-for c in d["result"]["ipv4_cidrs"]:
-    print(ipaddress.IPv4Network(c))
-' <<<"$json"
+fam = sys.argv[1]
+key, cls = ("ipv4_cidrs", ipaddress.IPv4Network) if fam == "4" else ("ipv6_cidrs", ipaddress.IPv6Network)
+for c in d["result"][key]:
+    print(cls(c))
+' "$1" <<<"$json"
+}
+
+has_global_v6() { ip -6 addr show scope global 2>/dev/null | grep -q inet6; }
+
+# IPv6 mirror. A no-op while the node has no global IPv6 address (true today);
+# if one ever appears, the same ports get the same Cloudflare-only rule on v6.
+apply_v6() {
+  local ranges n old new p cache6="${CACHE%.txt}-v6.txt"
+  if ! has_global_v6; then
+    rollback_v6 quiet
+    log "ipv6: no global address, nothing to restrict"
+    return 0
+  fi
+  if ranges=$(fetch_ranges 6); then n=$(grep -c . <<<"$ranges" || true); else n=0; fi
+  if (( n < 3 )); then
+    if [[ -s "$cache6" ]]; then ranges=$(cat "$cache6"); n=$(grep -c . <<<"$ranges")
+    else log "ipv6: fetch failed and no cache; v6 left unchanged"; return 1; fi
+  else
+    printf '%s\n' "$ranges" > "$cache6"
+  fi
+  old=$(ip6tables -S INPUT | awk '/xo-cf-origin-fw/ && /-j XO-CF443-/ {print $NF; exit}' || true)
+  if [[ "$old" == "${CHAIN_PREFIX}-A" ]]; then new="${CHAIN_PREFIX}-B"; else new="${CHAIN_PREFIX}-A"; fi
+  ip6tables -N "$new" 2>/dev/null || ip6tables -F "$new"
+  ip6tables -A "$new" -i lo -j ACCEPT
+  while read -r cidr; do [[ -n "$cidr" ]] && ip6tables -A "$new" -s "$cidr" -j ACCEPT; done <<<"$ranges"
+  ip6tables -A "$new" -j DROP
+  for p in $PORTS; do
+    ip6tables -I INPUT 1 -p tcp --dport "$p" -m comment --comment "xo-cf-origin-fw" -j "$new"
+  done
+  if [[ -n "$old" ]]; then
+    remove_jumps6 "$old"; ip6tables -F "$old" 2>/dev/null || true; ip6tables -X "$old" 2>/dev/null || true
+  fi
+  log "ipv6: ports $PORTS allowed from $n Cloudflare IPv6 ranges (chain $new)"
+}
+
+remove_jumps6() {
+  local c=$1 line
+  while line=$(ip6tables -S INPUT | grep -m1 -- "-j $c\$"); do
+    # shellcheck disable=SC2086
+    ip6tables ${line/-A INPUT/-D INPUT}
+  done
+}
+
+rollback_v6() {
+  local c
+  for c in "${CHAIN_PREFIX}-A" "${CHAIN_PREFIX}-B"; do
+    remove_jumps6 "$c"
+    ip6tables -F "$c" 2>/dev/null || true
+    ip6tables -X "$c" 2>/dev/null || true
+  done
+  [[ "${1:-}" == quiet ]] || log "ipv6: rolled back"
 }
 
 apply() {
   local ranges n old new
-  if ranges=$(fetch_ranges); then
+  if ranges=$(fetch_ranges 4); then
     n=$(grep -c . <<<"$ranges" || true)
   else
     n=0
@@ -99,10 +152,8 @@ apply() {
     iptables -F "$old" 2>/dev/null || true
     iptables -X "$old" 2>/dev/null || true
   fi
-  if ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
-    log "WARNING: node has a global IPv6 address; ports $PORTS are NOT restricted on IPv6"
-  fi
   log "applied: ports $PORTS allowed from $n Cloudflare IPv4 ranges (chain $new)"
+  apply_v6 || log "WARNING: ipv6 rule not applied; v6 traffic on $PORTS is unrestricted"
 }
 
 rollback() {
@@ -112,13 +163,15 @@ rollback() {
     iptables -F "$c" 2>/dev/null || true
     iptables -X "$c" 2>/dev/null || true
   done
-  log "rolled back: ports open to all sources"
+  rollback_v6 quiet
+  log "rolled back: ports open to all sources (IPv4 and IPv6)"
 }
 
 status() {
   iptables -S INPUT | grep -E "XO-CF443" || echo "no xo-cf-origin-fw rule in INPUT"
   local c; c=$(current_chain || true)
   [[ -n "$c" ]] && iptables -L "$c" -n -v --line-numbers
+  ip6tables -S INPUT | grep -E "XO-CF443" || echo "ipv6: no rule (no global address)"
   return 0
 }
 

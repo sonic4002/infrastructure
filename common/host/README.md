@@ -26,3 +26,8 @@ The pre-change ruleset is saved on the node at `/root/iptables-before-xo-cf-orig
 Ports 22, 6443, 10250 and all others are not touched.
 
 **Loopback must stay allowed.** The tls-terminator proxies decrypted 443 traffic to envoy at `127.0.0.1:80`; the chain's first rule is `-i lo -j ACCEPT`. Without it every xoffice host times out (this happened for about 3 minutes on 2026-11-15 and was rolled back). If a new hostname is ever pointed at this node DNS-only (grey cloud) on 443, it will time out: proxy it, or add its clients to the script.
+
+**Separate switch per port.** To drop the port-80 restriction and keep 443:
+`echo 'PORTS="443"' > /etc/default/xo-cf-origin-fw && xo-cf-origin-fw apply` (and the reverse with `PORTS="443 80"`).
+
+**IPv6.** `apply` mirrors the rule with ip6tables and Cloudflare's IPv6 ranges only when the node has a global IPv6 address. Today it has none, so the v6 part does nothing and logs `ipv6: no global address`.

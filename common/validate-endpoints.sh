@@ -15,6 +15,10 @@
 # Modes:
 #   production   Use HTTPS via Cloudflare (default if no IP overrides)
 #   --cilium-ip  IP address of the Cilium Gateway LoadBalancer (direct HTTP)
+#                NOTE: since 2026-11-15 the node accepts 80/443 only from
+#                Cloudflare (common/host/xo-cf-origin-fw), so this mode times out
+#                from outside the node. Use 'production', or run it on the node
+#                itself against 127.0.0.1 (loopback is allowed).
 #   --tls        Use HTTPS (requires valid certs or --insecure)
 #   --insecure   Skip TLS certificate verification (staging certs)
 #   --ws-only    Only run WebSocket tests
