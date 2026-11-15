@@ -1,0 +1,11 @@
+[Unit]
+Description=Allow TCP 443 only from Cloudflare (xoffice origin)
+Wants=network-online.target
+After=network-online.target k3s.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xo-cf-origin-fw apply
+
+[Install]
+WantedBy=multi-user.target
